@@ -1,13 +1,12 @@
 """Trafiklab Realtime API client.
 
 Uses two endpoints (https://www.trafiklab.se/api/our-apis/trafiklab-realtime-apis/):
-  * Stop Lookup: find the id of a stop area by name.
+  * Stop Lookup: find stop areas by name.
   * Timetables:  list departures from a stop area during the next 60 minutes.
 
-Responses for large stop areas (such as all of Karlskrona) can be too big to
-parse in one go on an ESP32. The functions below therefore read the HTTP body
-in small chunks and decode one JSON object at a time, so memory use stays
-constant regardless of response size.
+Responses can be too big to parse in one go on an ESP32. The functions below
+therefore read the HTTP body in small chunks and decode one JSON object at a
+time, so memory use stays constant regardless of response size.
 
 All functions are blocking. Call them from the background worker only.
 """
@@ -26,6 +25,33 @@ CHUNK_SIZE = 1024
 
 # A departure counts as delayed when it is at least this many seconds late
 DELAY_THRESHOLD_S = 60
+
+# Bounding box around Karlskrona municipality. A stop area belongs to the
+# municipality when one of its child stops lies inside this box. This removes
+# look-alikes such as "Malmo Karlskronaplan" or "Karlskronavagen" elsewhere.
+AREA_LAT_MIN = 56.05
+AREA_LAT_MAX = 56.35
+AREA_LON_MIN = 15.45
+AREA_LON_MAX = 16.05
+
+# Name searches used to collect every stop in the municipality. The API has no
+# "stops near a position" endpoint and the full list covers all of Sweden, so
+# we search for the town and for each locality instead. Add more names here if
+# a stop is missing.
+SEARCH_TERMS = (
+    "Karlskrona",
+    "Lyckeby",
+    "Nättraby",
+    "Rödeby",
+    "Jämjö",
+    "Sturkö",
+    "Hasslö",
+    "Tjurkö",
+    "Torhamn",
+    "Ramdala",
+    "Trummenäs",
+    "Aspö",
+)
 
 # Text describing the most recent failure, empty if the last request succeeded
 _last_error = ""
@@ -172,46 +198,108 @@ def _iter_json_array(stream, key):
             return
 
 
-def find_stop_id(name):
-    """Look up the id of a stop area by name using Trafiklab Stop Lookup.
+def _in_area(group):
+    """Return True if a child stop of ``group`` lies inside Karlskrona."""
+    for child in group.get("stops") or []:
+        lat = child.get("lat")
+        lon = child.get("lon")
+        if lat is None or lon is None:
+            continue
+        if AREA_LAT_MIN <= lat <= AREA_LAT_MAX and AREA_LON_MIN <= lon <= AREA_LON_MAX:
+            return True
+    return False
 
-    An exact (case-insensitive) name match is preferred. If there is none,
-    the first result is used, which is the stop with the most departures.
+
+def _stop_name(group):
+    """Return the real name of a stop area.
+
+    The group name is kept when one of its child stops has the same name.
+    Otherwise the group name is a made-up label, so the shortest child stop
+    name is used instead.
+    """
+    name = group.get("name") or ""
+    children = group.get("stops") or []
+    shortest = None
+    for child in children:
+        child_name = child.get("name") or ""
+        if child_name == name:
+            return name
+        if child_name and (shortest is None or len(child_name) < len(shortest)):
+            shortest = child_name
+    return shortest or name
+
+
+def _traffic_key(stop):
+    """Sort key: busiest stops first."""
+    return -stop["traffic"]
+
+
+def find_stops(town, limit=40):
+    """Collect all stop areas in Karlskrona municipality.
+
+    ``town`` is only used for the error message; the stops come from the
+    name searches in ``SEARCH_TERMS`` filtered by coordinates. The generic
+    meta stop (for example "Karlskrona") and stops without traffic are left
+    out. The busiest stop comes first, so it is a sensible default.
 
     Args:
-        name: Stop name to search for, for example 'Karlskrona'.
+        town: Name of the town, for example 'Karlskrona'.
+        limit: Maximum number of stops to return.
 
     Returns:
-        The stop area id as a string, or None on failure (see get_last_error).
+        A list of dicts with 'id', 'name' and 'traffic', or None if nothing
+        could be fetched (see get_last_error).
     """
-    response = None
-    try:
-        gc.collect()
-        response = _open("stops/name/" + _url_encode(name))
+    stops = []
+    seen_ids = set()
+    seen_names = set()
+    failures = 0
+    last_failure = ""
 
-        wanted = name.lower()
-        first_id = None
-        for group in _iter_json_array(response.raw, b"stop_groups"):
-            group_id = group.get("id")
-            if first_id is None:
-                first_id = group_id
-            if (group.get("name") or "").lower() == wanted:
-                _clear_error()
-                return group_id
+    for term in SEARCH_TERMS:
+        response = None
+        try:
+            gc.collect()
+            response = _open("stops/name/" + _url_encode(term))
 
-        if first_id is None:
-            _set_error("Stop not found: " + name)
-            return None
+            for group in _iter_json_array(response.raw, b"stop_groups"):
+                group_id = group.get("id")
+                traffic = group.get("average_daily_stop_times") or 0
 
-        _clear_error()
-        return first_id
-    except Exception as error:
-        _set_error(type(error).__name__ + " " + str(error))
+                # Skip the generic meta stop, unused stops and duplicates
+                if group.get("area_type") == "META_STOP":
+                    continue
+                if traffic <= 0 or group_id in seen_ids:
+                    continue
+                if not _in_area(group):
+                    continue
+
+                name = _stop_name(group)
+                if not name or name in seen_names:
+                    continue
+
+                seen_ids.add(group_id)
+                seen_names.add(name)
+                stops.append({"id": group_id, "name": name, "traffic": traffic})
+        except Exception as error:
+            failures += 1
+            last_failure = type(error).__name__ + " " + str(error)
+        finally:
+            if response is not None:
+                response.close()
+            gc.collect()
+
+    if not stops:
+        _set_error(last_failure or "No stops found: " + town)
         return None
-    finally:
-        if response is not None:
-            response.close()
-        gc.collect()
+
+    # A few failed searches are tolerated; the list is then just shorter
+    if failures:
+        print("Trafiklab: %d stop searches failed" % failures)
+    _clear_error()
+
+    stops.sort(key=_traffic_key)
+    return stops[:limit]
 
 
 def _status(item):
@@ -255,7 +343,7 @@ def get_departures(stop_id, limit=15):
     Only the ``limit`` earliest departures are kept in memory at any time.
 
     Args:
-        stop_id: Stop area id (rikshållplats or meta-stop id).
+        stop_id: Stop area id (rikshallplats or meta-stop id).
         limit: Maximum number of departures to return.
 
     Returns:

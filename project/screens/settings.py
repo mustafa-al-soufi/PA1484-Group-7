@@ -1,14 +1,14 @@
 """Settings screen (US3.1): stop, transport type and connection status.
 
-Each setting lives in its own section (a rounded card). The widgets are built
-once by ``create_settings_screen``. Later phases add the actual controls to
-these sections: stop selection (US3.2B), transport dropdown (US3.3) and
-saving/resetting (US3.4, US3.5).
+Each setting lives in its own section (a dark blue card). The widgets are
+built once by ``create_settings_screen``. The stop section contains the stop
+dropdown (US3.2B). Later phases add the transport dropdown (US3.3) and the
+save/reset buttons (US3.4, US3.5).
 """
 
 import lvgl as lv
 
-# Share fonts and colors with the departure screen so both look the same
+# Share fonts, colors and text cleaning with the departure screen
 from screens.departure import (
     COLOR_BG,
     COLOR_CANCELED,
@@ -18,10 +18,14 @@ from screens.departure import (
     COLOR_TEXT,
     FONT_BIG,
     FONT_SMALL,
+    _safe,
 )
 
 # Background color of the section cards (dark blue)
 COLOR_CARD = 0x1B2A41
+
+# Maximum height of the open stop list in pixels
+DROPDOWN_LIST_HEIGHT = 220
 
 
 def _make_label(parent, text, font, color):
@@ -59,7 +63,45 @@ def _make_section(parent, title, height):
     return section
 
 
-def create_settings_screen(parent, stop_name, transport="All"):
+def _make_stop_dropdown(parent, initial_text, on_stop_changed):
+    """Create the dropdown used to select a stop (US3.2B).
+
+    Args:
+        parent: Section the dropdown is added to.
+        initial_text: Text shown until the list of stops has been loaded.
+        on_stop_changed: Function called with the LVGL event when the user
+            picks another stop.
+
+    Returns:
+        The dropdown object.
+    """
+    dropdown = lv.dropdown(parent)
+    dropdown.set_width(lv.pct(100))
+    dropdown.set_options(_safe(initial_text))
+    dropdown.set_style_text_font(FONT_BIG, 0)
+    dropdown.set_style_text_color(lv.color_hex(COLOR_TEXT), 0)
+    dropdown.set_style_bg_opa(lv.OPA.COVER, 0)
+    dropdown.set_style_bg_color(lv.color_hex(COLOR_BG), 0)
+    dropdown.set_style_border_width(1, 0)
+    dropdown.set_style_border_color(lv.color_hex(COLOR_MUTED), 0)
+    dropdown.add_event_cb(on_stop_changed, lv.EVENT.VALUE_CHANGED, None)
+
+    # Style the list that opens below the dropdown. Not every LVGL build
+    # allows this before the list is opened, so a failure is not fatal.
+    try:
+        stop_list = dropdown.get_list()
+        stop_list.set_style_bg_color(lv.color_hex(COLOR_BG), 0)
+        stop_list.set_style_text_color(lv.color_hex(COLOR_TEXT), 0)
+        stop_list.set_style_text_font(FONT_BIG, 0)
+        stop_list.set_style_border_color(lv.color_hex(COLOR_MUTED), 0)
+        stop_list.set_style_max_height(DROPDOWN_LIST_HEIGHT, 0)
+    except Exception:
+        pass
+
+    return dropdown
+
+
+def create_settings_screen(parent, stop_text, on_stop_changed, transport="All"):
     """Build the settings screen inside ``parent`` (a tile).
 
     Layout, top to bottom: title, stop section, transport type section and
@@ -67,12 +109,14 @@ def create_settings_screen(parent, stop_name, transport="All"):
 
     Args:
         parent: LVGL object that will contain the screen.
-        stop_name: Name of the currently selected stop.
+        stop_text: Text shown in the stop dropdown until the stops are loaded.
+        on_stop_changed: Function called with the LVGL event when the user
+            selects another stop in the dropdown.
         transport: Name of the currently selected transport type.
 
     Returns:
-        A dict with the labels that ``update_connection_status`` and later
-        phases need to change.
+        A dict with the widgets that ``set_stops``,
+        ``update_connection_status`` and later phases need.
     """
     parent.set_style_bg_opa(lv.OPA.COVER, 0)
     parent.set_style_bg_color(lv.color_hex(COLOR_BG), 0)
@@ -89,9 +133,9 @@ def create_settings_screen(parent, stop_name, transport="All"):
 
     _make_label(root, "Settings", FONT_BIG, COLOR_TEXT)
 
-    # Section 1: stop (selection is added in phase 5)
-    stop_section = _make_section(root, "Stop", 80)
-    stop_value = _make_label(stop_section, stop_name, FONT_BIG, COLOR_TEXT)
+    # Section 1: stop selection (US3.2B)
+    stop_section = _make_section(root, "Stop", 110)
+    dropdown = _make_stop_dropdown(stop_section, stop_text, on_stop_changed)
 
     # Section 2: transport type (dropdown is added in phase 6)
     transport_section = _make_section(root, "Transport type", 80)
@@ -108,11 +152,26 @@ def create_settings_screen(parent, stop_name, transport="All"):
 
     return {
         "root": root,
-        "stop": stop_value,
+        "dropdown": dropdown,
         "transport": transport_value,
         "wifi": wifi_value,
         "data": data_value,
     }
+
+
+def set_stops(screen, names, selected):
+    """Fill the stop dropdown with the selectable stops.
+
+    Changing the options from code does not trigger the change callback.
+
+    Args:
+        screen: Dict returned by ``create_settings_screen``.
+        names: List of stop names, in the order they should be listed.
+        selected: Index in ``names`` of the stop that is currently selected.
+    """
+    options = "\n".join([_safe(name) for name in names])
+    screen["dropdown"].set_options(options)
+    screen["dropdown"].set_selected(selected)
 
 
 def update_connection_status(screen, wifi_connected, data_ok):
