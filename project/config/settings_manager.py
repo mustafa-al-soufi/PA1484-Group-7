@@ -1,19 +1,18 @@
-"""Persistent user settings (US3.4 save, US3.5 reset).
+"""Saves and loads the user's default settings (US3.4, US3.5).
 
-The settings are stored as a small JSON file in the flash file system of the
-ESP32, so they survive a restart. A missing or damaged file is never an
-error: the built-in defaults are used instead.
+The settings are stored as JSON in the flash memory of the ESP32, so they
+are still there after a restart. A missing or broken file is not an error,
+the defaults are used instead.
 """
 
 import json
 
-# File on the ESP32 file system (created on the first save)
 SETTINGS_FILE = "settings.json"
 
-# Transport types that may be stored (must match the settings screen)
+# Must match the transport types in the settings screen
 VALID_TRANSPORTS = ("All", "Bus", "Train", "Ferry")
 
-# Built-in defaults: the busiest stop (stop_id None) and all transport types
+# stop_id None means "use the busiest stop"
 DEFAULTS = {
     "stop_id": None,
     "stop_name": "",
@@ -22,15 +21,15 @@ DEFAULTS = {
 
 
 def defaults():
-    """Return a fresh copy of the built-in default settings."""
+    """Return a new copy of the default settings."""
     return dict(DEFAULTS)
 
 
 def _clean(data):
-    """Return a valid settings dict built from ``data``.
+    """Return valid settings built from ``data``.
 
-    Unknown keys are dropped and invalid values fall back to the defaults, so
-    a hand-edited or half-written file cannot crash the application.
+    Unknown keys are dropped and bad values become defaults, so a broken
+    file can never crash the app.
     """
     settings = defaults()
     if not isinstance(data, dict):
@@ -47,33 +46,19 @@ def _clean(data):
 
 
 def load():
-    """Load the saved default settings.
-
-    Returns:
-        A dict with 'stop_id', 'stop_name' and 'transport'. If nothing has
-        been saved yet, or the file is unreadable, the built-in defaults.
-    """
+    """Return the saved settings, or the defaults if there are none."""
     try:
         with open(SETTINGS_FILE) as file:
             return _clean(json.load(file))
     except OSError:
-        # No file yet: nothing has been saved
-        return defaults()
+        return defaults()  # nothing saved yet
     except ValueError:
-        # File exists but is not valid JSON
         print("Settings file is damaged, using defaults")
         return defaults()
 
 
 def save(settings):
-    """Save ``settings`` as the new default settings.
-
-    Args:
-        settings: Dict with 'stop_id', 'stop_name' and 'transport'.
-
-    Returns:
-        True if the file was written, False on failure.
-    """
+    """Save ``settings`` as the new defaults. Returns True if it worked."""
     try:
         with open(SETTINGS_FILE, "w") as file:
             json.dump(_clean(settings), file)

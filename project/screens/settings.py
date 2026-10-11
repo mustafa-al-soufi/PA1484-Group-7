@@ -1,9 +1,4 @@
-"""Settings screen (US3.1): stop selection, transport type, saving and
-connection status.
-
-Like the departure screen, the widgets are created once. Later changes only
-update texts and options.
-"""
+"""Settings screen (US3.1): stop, transport type, save/reset and connection status."""
 
 import lvgl as lv
 
@@ -15,32 +10,24 @@ from screens.departure import (
     COLOR_TEXT,
     FONT_BIG,
     FONT_SMALL,
-    _safe,
+    make_button,
+    make_label,
+    safe_text,
 )
 
-# Card background (dark blue) and dropdown list height in pixels
 COLOR_CARD = 0x1B2A41
-DROPDOWN_LIST_HEIGHT = 220
-
-# Button colors: save is green, reset is blue-grey
 COLOR_SAVE = 0x2E7D32
 COLOR_RESET = 0x455A64
 
-# Transport types in the order shown in the dropdown (US3.3)
+# Height of the opened dropdown list in pixels
+DROPDOWN_LIST_HEIGHT = 220
+
+# Same order as in the dropdown (US3.3)
 TRANSPORT_TYPES = ("All", "Bus", "Train", "Ferry")
 
 
-def _make_label(parent, text, font, color):
-    """Create a styled label."""
-    label = lv.label(parent)
-    label.set_text(_safe(text))
-    label.set_style_text_font(font, 0)
-    label.set_style_text_color(lv.color_hex(color), 0)
-    return label
-
-
 def _make_section(parent, title, height):
-    """Create a dark blue card with a small title and return the card."""
+    """Create a dark card with a small title and return it."""
     card = lv.obj(parent)
     card.set_width(lv.pct(100))
     card.set_height(height)
@@ -52,22 +39,14 @@ def _make_section(parent, title, height):
     card.set_style_pad_row(6, 0)
     card.remove_flag(lv.obj.FLAG.SCROLLABLE)
     card.set_flex_flow(lv.FLEX_FLOW.COLUMN)
-    _make_label(card, title, FONT_SMALL, COLOR_MUTED)
+    make_label(card, title, 0, FONT_SMALL, COLOR_MUTED)
     return card
 
 
 def _make_dropdown(parent, options, selected, on_changed):
-    """Create a styled dropdown.
+    """Create a dropdown. ``options`` is text with one option per line.
 
-    Args:
-        parent: Card that contains the dropdown.
-        options: Text with one option per line.
-        selected: Index of the option shown first.
-        on_changed: Function called with the new index when the user picks
-            another option.
-
-    Returns:
-        The dropdown widget.
+    ``on_changed`` is called when the user picks another option.
     """
     dropdown = lv.dropdown(parent)
     dropdown.set_width(lv.pct(100))
@@ -78,8 +57,7 @@ def _make_dropdown(parent, options, selected, on_changed):
     dropdown.set_style_bg_color(lv.color_hex(COLOR_BG), 0)
     dropdown.set_style_border_color(lv.color_hex(COLOR_MUTED), 0)
 
-    # Style the opened list. Wrapped in try/except because some LVGL builds
-    # do not expose every style function.
+    # Style the opened list too. Some LVGL builds lack some of these functions.
     try:
         option_list = dropdown.get_list()
         option_list.set_style_bg_color(lv.color_hex(COLOR_BG), 0)
@@ -90,35 +68,14 @@ def _make_dropdown(parent, options, selected, on_changed):
     except Exception as error:
         print("Dropdown list style skipped:", error)
 
-    def handler(event):
-        """Forward the selected index to the application."""
-        on_changed(dropdown.get_selected())
-
-    dropdown.add_event_cb(handler, lv.EVENT.VALUE_CHANGED, None)
+    dropdown.add_event_cb(on_changed, lv.EVENT.VALUE_CHANGED, None)
     return dropdown
 
 
-def _make_button(parent, text, color, on_click):
-    """Create a rounded button with a centered label.
-
-    Args:
-        parent: Row that contains the button.
-        text: Button caption.
-        color: Background color of the button.
-        on_click: Function called when the button is pressed.
-    """
-    # LVGL 9 calls the widget 'button', older bindings call it 'btn'
-    button_class = getattr(lv, "button", None) or lv.btn
-    button = button_class(parent)
-    button.set_size(190, 44)
-    button.set_style_bg_color(lv.color_hex(color), 0)
-    button.set_style_radius(10, 0)
-
-    label = _make_label(button, text, FONT_BIG, COLOR_TEXT)
-    label.center()
-
-    button.add_event_cb(on_click, lv.EVENT.CLICKED, None)
-    return button
+def _show_status(label, text, ok):
+    """Set the text of a label, green if ``ok`` and red if not."""
+    label.set_text(text)
+    label.set_style_text_color(lv.color_hex(COLOR_OK if ok else COLOR_CANCELED), 0)
 
 
 def create_settings_screen(
@@ -130,19 +87,11 @@ def create_settings_screen(
     on_reset,
     transport="All",
 ):
-    """Build the settings screen inside ``parent`` (a tile).
+    """Build the screen inside ``parent`` (a tile) and return its widgets.
 
-    Args:
-        parent: LVGL object that will contain the screen.
-        stop_text: Text shown in the stop dropdown until the list is loaded.
-        on_stop_changed: Called with the index of the chosen stop.
-        on_transport_changed: Called with the index in ``TRANSPORT_TYPES``.
-        on_save: Called when 'Save as Default' is pressed (US3.4).
-        on_reset: Called when 'Reset to Default' is pressed (US3.5).
-        transport: Transport type selected at start.
-
-    Returns:
-        A dict with the widgets the update functions need.
+    ``stop_text`` is shown in the stop dropdown until the stops are loaded.
+    The on_... arguments are the functions called when the user changes
+    something or presses Save (US3.4) or Reset (US3.5).
     """
     parent.set_style_bg_opa(lv.OPA.COVER, 0)
     parent.set_style_bg_color(lv.color_hex(COLOR_BG), 0)
@@ -156,11 +105,11 @@ def create_settings_screen(
     root.remove_flag(lv.obj.FLAG.SCROLLABLE)
     root.set_flex_flow(lv.FLEX_FLOW.COLUMN)
 
-    _make_label(root, "Settings", FONT_BIG, COLOR_TEXT)
+    make_label(root, "Settings", 0, FONT_BIG, COLOR_TEXT)
 
-    # Stop selection (US3.2B)
+    # Stop (US3.2B)
     stop_card = _make_section(root, "Stop", 90)
-    stop_dropdown = _make_dropdown(stop_card, _safe(stop_text), 0, on_stop_changed)
+    stop_dropdown = _make_dropdown(stop_card, safe_text(stop_text), 0, on_stop_changed)
 
     # Transport type (US3.3)
     transport_card = _make_section(root, "Transport type", 90)
@@ -174,10 +123,10 @@ def create_settings_screen(
 
     # Connection status (US4.3)
     status_card = _make_section(root, "Connection status", 100)
-    wifi_label = _make_label(status_card, "Wi-Fi: ...", FONT_BIG, COLOR_MUTED)
-    data_label = _make_label(status_card, "Live data: ...", FONT_BIG, COLOR_MUTED)
+    wifi_label = make_label(status_card, "Wi-Fi: ...", 0, FONT_BIG, COLOR_MUTED)
+    data_label = make_label(status_card, "Live data: ...", 0, FONT_BIG, COLOR_MUTED)
 
-    # Save and reset buttons (US3.4, US3.5) with a short feedback text
+    # Save and Reset buttons with a small message next to them
     button_row = lv.obj(root)
     button_row.set_width(lv.pct(100))
     button_row.set_height(52)
@@ -190,14 +139,14 @@ def create_settings_screen(
     button_row.set_flex_align(
         lv.FLEX_ALIGN.START, lv.FLEX_ALIGN.CENTER, lv.FLEX_ALIGN.CENTER
     )
-    _make_button(button_row, "Save as Default", COLOR_SAVE, on_save)
-    _make_button(button_row, "Reset to Default", COLOR_RESET, on_reset)
-    message_label = _make_label(button_row, "", FONT_SMALL, COLOR_MUTED)
+    make_button(button_row, "Save as Default", COLOR_SAVE, (190, 44), on_save, 10)
+    make_button(button_row, "Reset to Default", COLOR_RESET, (190, 44), on_reset, 10)
+    message_label = make_label(button_row, "", 0, FONT_SMALL, COLOR_MUTED)
 
     return {
         "root": root,
-        "dropdown": stop_dropdown,
-        "transport": transport_dropdown,
+        "stop_dropdown": stop_dropdown,
+        "transport_dropdown": transport_dropdown,
         "wifi": wifi_label,
         "data": data_label,
         "message": message_label,
@@ -205,39 +154,38 @@ def create_settings_screen(
 
 
 def set_stops(screen, names, selected):
-    """Fill the stop dropdown with ``names`` and select index ``selected``."""
+    """Fill the stop dropdown with ``names`` and select position ``selected``."""
     if not names:
         return
-    screen["dropdown"].set_options("\n".join(_safe(name) for name in names))
-    screen["dropdown"].set_selected(selected)
+    screen["stop_dropdown"].set_options("\n".join(safe_text(name) for name in names))
+    screen["stop_dropdown"].set_selected(selected)
 
 
 def set_selected_stop(screen, index):
-    """Show the stop with position ``index`` as selected in the dropdown."""
-    screen["dropdown"].set_selected(index)
+    """Select the stop at position ``index`` in the dropdown."""
+    screen["stop_dropdown"].set_selected(index)
 
 
 def set_transport(screen, transport):
-    """Show ``transport`` as selected in the transport dropdown."""
+    """Select ``transport`` in the transport dropdown."""
     if transport in TRANSPORT_TYPES:
-        screen["transport"].set_selected(TRANSPORT_TYPES.index(transport))
+        screen["transport_dropdown"].set_selected(TRANSPORT_TYPES.index(transport))
 
 
 def show_save_message(screen, text, ok=True):
-    """Show a short feedback text next to the buttons ('' clears it)."""
-    screen["message"].set_text(_safe(text))
-    screen["message"].set_style_text_color(
-        lv.color_hex(COLOR_OK if ok else COLOR_CANCELED), 0
-    )
+    """Show a short message next to the buttons. An empty text clears it."""
+    _show_status(screen["message"], safe_text(text), ok)
 
 
 def update_connection_status(screen, wifi_connected, data_ok):
-    """Show whether Wi-Fi is connected and the last data fetch succeeded."""
-    screen["wifi"].set_text("Wi-Fi: Connected" if wifi_connected else "Wi-Fi: Offline")
-    screen["wifi"].set_style_text_color(
-        lv.color_hex(COLOR_OK if wifi_connected else COLOR_CANCELED), 0
+    """Show if Wi-Fi is connected and if the last fetch worked (US4.3)."""
+    _show_status(
+        screen["wifi"],
+        "Wi-Fi: Connected" if wifi_connected else "Wi-Fi: Offline",
+        wifi_connected,
     )
-    screen["data"].set_text("Live data: OK" if data_ok else "Live data: Error")
-    screen["data"].set_style_text_color(
-        lv.color_hex(COLOR_OK if data_ok else COLOR_CANCELED), 0
+    _show_status(
+        screen["data"],
+        "Live data: OK" if data_ok else "Live data: Error",
+        data_ok,
     )

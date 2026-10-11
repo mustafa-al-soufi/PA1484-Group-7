@@ -1,8 +1,4 @@
-"""Wi-Fi helper functions for the Karlskrona Transit application.
-
-Keeps all network-interface handling in one place so that the UI and the
-API client never need to touch the ``network`` module directly.
-"""
+"""Wi-Fi helpers. Keeps the network module out of the rest of the app."""
 
 import time
 
@@ -13,31 +9,23 @@ from secrets import WIFI_SSID, WIFI_PASSWORD
 
 
 def is_connected():
-    """Return True if the station interface currently has a Wi-Fi connection."""
+    """Return True if the board is connected to Wi-Fi."""
     return network.WLAN(network.STA_IF).isconnected()
 
 
 def connect(timeout_ms=15_000):
-    """Connect to the configured Wi-Fi network.
+    """Connect to the Wi-Fi network from secrets.py.
 
-    Blocks until connected or until ``timeout_ms`` has passed, so it must
-    only be called from the background worker, never from the UI thread.
-
-    Args:
-        timeout_ms: Maximum time to wait for the connection, in milliseconds.
-
-    Returns:
-        True if the device is connected when the function returns.
+    Waits until connected or until the timeout, so only call it from the
+    background worker. Returns True if we are connected.
     """
     log("connecting to Wi-Fi SSID: " + WIFI_SSID)
     station = network.WLAN(network.STA_IF)
     station.active(True)
 
-    # Only start a new connection attempt if we are not already connected
     if not station.isconnected():
         station.connect(WIFI_SSID, WIFI_PASSWORD)
 
-    # Poll until connected or timed out
     started = time.ticks_ms()
     while (
         not station.isconnected()

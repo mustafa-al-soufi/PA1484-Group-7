@@ -1,11 +1,14 @@
-"""Departure screen (US1.2B, US4.2): live departures and a refresh button."""
+"""Departure screen (US1.2B, US4.2): the departure list and a Refresh button."""
 
 import lvgl as lv
 
-# Number of reusable rows. The list scrolls vertically if it does not fit.
+# Rows are created once and reused. The list scrolls if they do not fit.
 MAX_ROWS = 15
 
-# LVGL's built-in fonts have no å, ä or ö. Set to False for a font with them.
+# Longest destination text before it is cut off
+MAX_DESTINATION_CHARS = 16
+
+# The built-in fonts have no å, ä or ö. Set to False if you use another font.
 REPLACE_SWEDISH_CHARS = True
 
 FONT_BIG = lv.font_montserrat_20
@@ -25,7 +28,7 @@ COL_LINE = 70
 COL_DEST = 250
 COL_STATUS = 150
 
-# Width of the title, which pushes the Refresh button to the right edge
+# The wide title pushes the Refresh button to the right edge
 TITLE_WIDTH = 430
 
 STATUS_COLORS = {
@@ -40,8 +43,8 @@ ATTRIBUTION = "Data: Trafiklab.se (CC BY 4.0)"
 _CHAR_MAP = {"å": "a", "ä": "a", "ö": "o", "Å": "A", "Ä": "A", "Ö": "O"}
 
 
-def _safe(text):
-    """Return ``text`` with å/ä/ö replaced if the font cannot draw them."""
+def safe_text(text):
+    """Replace å, ä and ö if the font cannot draw them."""
     text = str(text)
     if not REPLACE_SWEDISH_CHARS:
         return text
@@ -51,19 +54,37 @@ def _safe(text):
     return result
 
 
-def _make_label(parent, text, width, font, color):
-    """Create a styled label. A ``width`` of 0 keeps the automatic width."""
+def make_label(parent, text, width, font, color):
+    """Create a label. Width 0 means the width is set automatically."""
     label = lv.label(parent)
     if width:
         label.set_width(width)
-    label.set_text(_safe(text))
+    label.set_text(safe_text(text))
     label.set_style_text_font(font, 0)
     label.set_style_text_color(lv.color_hex(color), 0)
     return label
 
 
+def make_button(parent, text, color, size, on_click=None, radius=None):
+    """Create a button with a centered text. ``size`` is (width, height)."""
+    # LVGL 9 calls it "button", older versions call it "btn"
+    button_class = getattr(lv, "button", None) or lv.btn
+    button = button_class(parent)
+    button.set_size(size[0], size[1])
+    button.set_style_bg_color(lv.color_hex(color), 0)
+    if radius is not None:
+        button.set_style_radius(radius, 0)
+
+    label = make_label(button, text, 0, FONT_BIG, COLOR_TEXT)
+    label.center()
+
+    if on_click is not None:
+        button.add_event_cb(on_click, lv.EVENT.CLICKED, None)
+    return button
+
+
 def _make_row(parent, height):
-    """Create a transparent horizontal row."""
+    """Create an empty row that lays out its children from left to right."""
     row = lv.obj(parent)
     row.set_size(580, height)
     row.set_style_bg_opa(lv.OPA.TRANSP, 0)
@@ -75,25 +96,10 @@ def _make_row(parent, height):
     return row
 
 
-def _make_refresh_button(parent, on_refresh):
-    """Create the manual refresh button (US4.2)."""
-    # LVGL 9 calls the widget 'button', older bindings call it 'btn'
-    button_class = getattr(lv, "button", None) or lv.btn
-    button = button_class(parent)
-    button.set_size(130, 38)
-    button.set_style_bg_color(lv.color_hex(COLOR_REFRESH), 0)
-    label = _make_label(button, "Refresh", 0, FONT_BIG, COLOR_TEXT)
-    label.center()
-    if on_refresh is not None:
-        button.add_event_cb(on_refresh, lv.EVENT.CLICKED, None)
-
-
 def create_departure_screen(parent, on_refresh=None):
-    """Build the screen once and return the widgets the updates need.
+    """Build the screen inside ``parent`` (a tile) and return its widgets.
 
-    Args:
-        parent: Tile that will contain the screen.
-        on_refresh: CLICKED event callback for the Refresh button.
+    ``on_refresh`` is called when the Refresh button is pressed (US4.2).
     """
     parent.set_style_bg_opa(lv.OPA.COVER, 0)
     parent.set_style_bg_color(lv.color_hex(COLOR_BG), 0)
@@ -107,18 +113,18 @@ def create_departure_screen(parent, on_refresh=None):
     root.remove_flag(lv.obj.FLAG.SCROLLABLE)
     root.set_flex_flow(lv.FLEX_FLOW.COLUMN)
 
-    # Title on the left, refresh button on the right
+    # Title on the left, Refresh button on the right
     title_row = _make_row(root, 44)
-    _make_label(title_row, "Departures", TITLE_WIDTH, FONT_BIG, COLOR_TEXT)
-    _make_refresh_button(title_row, on_refresh)
+    make_label(title_row, "Departures", TITLE_WIDTH, FONT_BIG, COLOR_TEXT)
+    make_button(title_row, "Refresh", COLOR_REFRESH, (130, 38), on_refresh)
 
     header = _make_row(root, 30)
-    _make_label(header, "Time", COL_TIME, FONT_SMALL, COLOR_MUTED)
-    _make_label(header, "Line", COL_LINE, FONT_SMALL, COLOR_MUTED)
-    _make_label(header, "Destination", COL_DEST, FONT_SMALL, COLOR_MUTED)
-    _make_label(header, "Status", COL_STATUS, FONT_SMALL, COLOR_MUTED)
+    make_label(header, "Time", COL_TIME, FONT_SMALL, COLOR_MUTED)
+    make_label(header, "Line", COL_LINE, FONT_SMALL, COLOR_MUTED)
+    make_label(header, "Destination", COL_DEST, FONT_SMALL, COLOR_MUTED)
+    make_label(header, "Status", COL_STATUS, FONT_SMALL, COLOR_MUTED)
 
-    # Vertical scrolling only, so horizontal swipes reach the tileview (US2.1)
+    # Only vertical scrolling, so sideways swipes reach the tileview (US2.1)
     list_box = lv.obj(root)
     list_box.set_width(lv.pct(100))
     list_box.set_flex_grow(1)
@@ -129,40 +135,40 @@ def create_departure_screen(parent, on_refresh=None):
     list_box.set_scroll_dir(lv.DIR.VER)
     list_box.set_flex_flow(lv.FLEX_FLOW.COLUMN)
 
-    # All rows are created once, hidden; update_departures fills them
+    # Create all rows now and hide them. update_departures fills them later.
     rows = []
     for _ in range(MAX_ROWS):
         row = _make_row(list_box, 50)
         rows.append(
             {
                 "row": row,
-                "time": _make_label(row, "", COL_TIME, FONT_BIG, COLOR_TEXT),
-                "line": _make_label(row, "", COL_LINE, FONT_BIG, COLOR_TEXT),
-                "dest": _make_label(row, "", COL_DEST, FONT_BIG, COLOR_TEXT),
-                "status": _make_label(row, "", COL_STATUS, FONT_BIG, COLOR_TEXT),
+                "time": make_label(row, "", COL_TIME, FONT_BIG, COLOR_TEXT),
+                "line": make_label(row, "", COL_LINE, FONT_BIG, COLOR_TEXT),
+                "dest": make_label(row, "", COL_DEST, FONT_BIG, COLOR_TEXT),
+                "status": make_label(row, "", COL_STATUS, FONT_BIG, COLOR_TEXT),
             }
         )
         row.add_flag(lv.obj.FLAG.HIDDEN)
 
-    # Message shown instead of the rows (loading, empty list, errors)
-    message = _make_label(list_box, "", 0, FONT_BIG, COLOR_MUTED)
+    # Text shown instead of the rows (loading, no departures, errors)
+    message = make_label(list_box, "", 0, FONT_BIG, COLOR_MUTED)
     message.set_width(lv.pct(100))
     message.add_flag(lv.obj.FLAG.HIDDEN)
 
-    _make_label(root, ATTRIBUTION, 0, FONT_SMALL, COLOR_MUTED)
+    make_label(root, ATTRIBUTION, 0, FONT_SMALL, COLOR_MUTED)
     return {"root": root, "list": list_box, "rows": rows, "message": message}
 
 
 def show_message(screen, text):
-    """Hide all departure rows and show ``text`` in their place."""
+    """Hide the departure rows and show ``text`` instead."""
     for item in screen["rows"]:
         item["row"].add_flag(lv.obj.FLAG.HIDDEN)
-    screen["message"].set_text(_safe(text))
+    screen["message"].set_text(safe_text(text))
     screen["message"].remove_flag(lv.obj.FLAG.HIDDEN)
 
 
 def update_departures(screen, departures, error=""):
-    """Show departures. None means the fetch failed, [] that none are due."""
+    """Show the departures. None means the fetch failed, [] means none left."""
     if departures is None:
         text = "Could not fetch departures"
         if error:
@@ -181,15 +187,15 @@ def update_departures(screen, departures, error=""):
         departure = departures[index]
         status = departure.get("status") or ""
 
-        # Truncate long destinations so they stay on one line
+        # Cut long destinations so they fit on one line
         destination = str(departure.get("destination") or "")
-        if len(destination) > 16:
-            destination = destination[:15] + "."
+        if len(destination) > MAX_DESTINATION_CHARS:
+            destination = destination[: MAX_DESTINATION_CHARS - 1] + "."
 
-        item["time"].set_text(_safe(departure.get("time") or "--:--"))
-        item["line"].set_text(_safe(departure.get("line") or ""))
-        item["dest"].set_text(_safe(destination))
-        item["status"].set_text(_safe(status))
+        item["time"].set_text(safe_text(departure.get("time") or "--:--"))
+        item["line"].set_text(safe_text(departure.get("line") or ""))
+        item["dest"].set_text(safe_text(destination))
+        item["status"].set_text(safe_text(status))
         item["status"].set_style_text_color(
             lv.color_hex(STATUS_COLORS.get(status, COLOR_TEXT)), 0
         )
