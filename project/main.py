@@ -16,6 +16,9 @@ from screens.departure import (
     update_departures,
 )
 
+from screens.settings import create_settings_screen, update_connection_status
+
+from services import wifi
 from services.departure_worker import DepartureWorker
 
 # Stop area to show departures for (US1.2B)
@@ -55,7 +58,9 @@ class Application:
         self.tileview.set_scrollbar_mode(lv.SCROLLBAR_MODE.OFF)
 
         self.tile1 = self.tileview.add_tile(0, 0, lv.DIR.RIGHT)
-        self.tile2 = self.tileview.add_tile(1, 0, lv.DIR.LEFT)
+        # Tile 2 can now be swiped both ways: back to start, on to settings
+        self.tile2 = self.tileview.add_tile(1, 0, lv.DIR.LEFT | lv.DIR.RIGHT)
+        self.tile3 = self.tileview.add_tile(2, 0, lv.DIR.LEFT)
 
         self.tile1_label = lv.label(self.tile1)
         self.tile1_label.set_text(
@@ -77,19 +82,25 @@ class Application:
         self.departure_list = create_departure_screen(self.tile2)
         show_message(self.departure_list, "Loading...")
 
+        # Settings screen (US3.1)
+        self.settings_screen = create_settings_screen(self.tile3, STOP_NAME)
+
     def request_refresh(self, timer=None):
         "Function: Starts a background fetch of the departures (US4.1)"
         if not self.worker.start():
             log("refresh skipped: previous fetch still running")
 
     def poll_worker(self, timer=None):
-        "Function: Updates the departure screen when a fetch has finished"
+        "Function: Updates the screens when a fetch has finished"
         result = self.worker.take_result()
         if result is None:
             return  # still fetching, or nothing new
 
         departures, error = result
         update_departures(self.departure_list, departures, error)
+        update_connection_status(
+            self.settings_screen, wifi.is_connected(), departures is not None
+        )
         log("departures: " + ("error" if departures is None else str(len(departures))))
 
     @staticmethod
