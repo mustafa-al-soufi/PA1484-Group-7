@@ -1,130 +1,111 @@
-"""Background worker that fetches departures without blocking the UI.
+"""Background worker that fetches data from Trafiklab without blocking the UI.
 
-LVGL is not thread safe, so the worker never touches the UI. It only stores
-its results in plain attributes. The UI thread polls ``take_result`` and
-``take_stops`` from an LVGL timer and updates the screens itself.
+LVGL is not thread safe, so the worker never touches any widget. It only
+writes plain attributes; the UI thread picks them up with ``take_result``
+and ``take_stops`` from an LVGL timer.
 """
 
 import _thread
-import gc
 
 from services import trafiklab, wifi
 
-# TLS needs more stack than the MicroPython default for new threads
+# The streaming JSON parser and TLS need more stack than the default
 WORKER_STACK_SIZE = 24 * 1024
 
 
 class DepartureWorker:
-    """Runs Wi-Fi connection, stop list and departure fetching in a thread."""
+    """Loads the stop list once and fetches departures on request."""
 
     def __init__(self, town, stop_id=None, limit=15):
-        """Create a worker.
+        """Create the worker.
 
         Args:
-            town: Town whose stops can be selected, e.g. 'Karlskrona'.
-            stop_id: Stop to show from the start. If None, the busiest stop
-                in ``town`` is used.
-            limit: Maximum number of departures to fetch.
+            town: Town whose stops are offered, for example 'Karlskrona'.
+            stop_id: Stop area id to start with, or None to use the busiest.
+            limit: Maximum number of departures per fetch.
         """
         self.town = town
         self.stop_id = stop_id
-        self.stop_name = None  # name of the selected stop, known once loaded
+        self.stop_name = ""
+        self.transport = trafiklab.TRANSPORT_ALL
         self.limit = limit
-
         self.busy = False  # True while a fetch is running
-        self._has_result = False  # True when a result is waiting to be read
-        self._departures = None
-        self._error = ""
 
-        self._stops = None  # list of selectable stops waiting to be read
-        self._stops_loaded = False  # True once the list has been fetched
+        self._stops_loaded = False
+        self._stops = None  # list waiting to be taken by the UI
+        self._result = None  # (departures, error) waiting for the UI
 
     def set_stop(self, stop_id, stop_name):
-        """Change the stop that departures are fetched for.
-
-        Takes effect the next time a fetch is started.
-
-        Args:
-            stop_id: Id of the new stop area.
-            stop_name: Name of the new stop area.
-        """
+        """Select the stop used by the next fetch."""
         self.stop_id = stop_id
         self.stop_name = stop_name
 
+    def set_transport(self, transport):
+        """Select the transport type used by the next fetch (US3.3)."""
+        self.transport = transport
+
     def start(self):
-        """Start a background fetch.
+        """Start a fetch in the background. Ignored while one is running.
 
         Returns:
-            True if a new fetch was started, False if one is already running.
+            True if a new fetch was started, False if one is already busy.
         """
         if self.busy:
             return False
         self.busy = True
-        self._has_result = False
-        try:
-            _thread.stack_size(WORKER_STACK_SIZE)
-        except Exception:
-            pass  # keep the default stack size if it cannot be changed
+        _thread.stack_size(WORKER_STACK_SIZE)
         _thread.start_new_thread(self._run, ())
         return True
 
     def take_result(self):
-        """Return the finished result once, or None if nothing is ready.
-
-        Returns:
-            None, or a tuple ``(departures, error)`` where ``departures`` is
-            a list (possibly empty) or None on failure, and ``error`` is a
-            short error text ('' if there was no error).
-        """
-        if not self._has_result:
-            return None
-        self._has_result = False
-        return self._departures, self._error
+        """Return ``(departures, error)`` once, or None if nothing is new."""
+        result = self._result
+        self._result = None
+        return result
 
     def take_stops(self):
-        """Return the list of selectable stops once, or None if not ready.
-
-        Returns:
-            None, or a list of dicts with the keys 'id' and 'name'.
-        """
+        """Return the freshly loaded stop list once, or None."""
         stops = self._stops
         self._stops = None
         return stops
 
-    def _run(self):
-        """Thread body: connect, load the stop list, fetch departures."""
-        try:
-            gc.collect()
+    def _ensure_wifi(self):
+        """Return True when Wi-Fi is connected, trying to connect if needed."""
+        if not wifi.is_connected():
+            wifi.connect()
+        return wifi.is_connected()
 
-            # Step 1: make sure Wi-Fi is connected
-            if not wifi.is_connected() and not wifi.connect():
-                self._finish(None, "No Wi-Fi connection")
+    def _run(self):
+        """Thread body: Wi-Fi check, stop list (first time), departures."""
+        try:
+            if not self._ensure_wifi():
+                self._finish(None, "No Wi-Fi")
                 return
 
-            # Step 2: load the selectable stops once and pick the default stop
+            # The stop list is only downloaded once per start
             if not self._stops_loaded:
                 stops = trafiklab.find_stops(self.town)
-                if not stops:
-                    self._finish(None, trafiklab.get_last_error() or "No stops found")
-                    return
+                if stops is not None:
+                    self._stops_loaded = True
+                    if self.stop_id is None:
+                        self.stop_id = stops[0]["id"]
+                        self.stop_name = stops[0]["name"]
+                    self._stops = stops
 
-                # Set the default stop before the list is published, so the
-                # UI always finds a selected stop when it receives the list
-                if self.stop_id is None:
-                    self.stop_id = stops[0]["id"]
-                    self.stop_name = stops[0]["name"]
-                self._stops = stops
-                self._stops_loaded = True
+            if self.stop_id is None:
+                self._finish(None, trafiklab.get_last_error())
+                return
 
-            # Step 3: fetch the departures for the selected stop
-            departures = trafiklab.get_departures(self.stop_id, self.limit)
-            self._finish(departures, trafiklab.get_last_error())
-        except Exception as error:
-            self._finish(None, type(error).__name__)
+            # Copy the selection so a change during the fetch cannot mix
+            stop_id = self.stop_id
+            transport = self.transport
+            departures = trafiklab.get_departures(stop_id, self.limit, transport)
+            error = "" if departures is not None else trafiklab.get_last_error()
+            self._finish(departures, error)
+        except Exception as exc:
+            self._finish(None, type(exc).__name__)
 
     def _finish(self, departures, error):
-        """Publish the result. The flags are set last so readers see all data."""
-        self._departures = departures
-        self._error = error
-        self._has_result = True
+        """Publish the result and mark the worker as idle."""
+        self._result = (departures, error)
         self.busy = False

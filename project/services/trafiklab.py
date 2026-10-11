@@ -26,6 +26,10 @@ CHUNK_SIZE = 1024
 # A departure counts as delayed when it is at least this many seconds late
 DELAY_THRESHOLD_S = 60
 
+# Transport types offered in the settings screen (US3.3). The API reports
+# them in upper case (BUS, TRAIN, FERRY); "All" disables filtering.
+TRANSPORT_ALL = "All"
+
 # Bounding box around Karlskrona municipality. A stop area belongs to the
 # municipality when one of its child stops lies inside this box. This removes
 # look-alikes such as "Malmo Karlskronaplan" or "Karlskronavagen" elsewhere.
@@ -311,6 +315,15 @@ def _status(item):
     return "On time"
 
 
+def _matches_transport(item, transport):
+    """Return True if a raw departure should be shown for ``transport``."""
+    if transport == TRANSPORT_ALL:
+        return True
+    route = item.get("route") or {}
+    mode = (route.get("transport_mode") or "").upper()
+    return mode == transport.upper()
+
+
 def _to_departure(item):
     """Reduce a raw API departure to the few fields the UI needs.
 
@@ -337,14 +350,17 @@ def _sort_key(departure):
     return departure["sort"]
 
 
-def get_departures(stop_id, limit=15):
+def get_departures(stop_id, limit=15, transport=TRANSPORT_ALL):
     """Fetch the next departures from a stop area.
 
     Only the ``limit`` earliest departures are kept in memory at any time.
+    Departures of other transport types are dropped before they are stored,
+    so a filter such as 'Train' still fills the list with trains.
 
     Args:
         stop_id: Stop area id (rikshallplats or meta-stop id).
         limit: Maximum number of departures to return.
+        transport: 'All', 'Bus', 'Train' or 'Ferry'.
 
     Returns:
         A list of departure dicts (empty if there are none), or None if the
@@ -357,6 +373,8 @@ def get_departures(stop_id, limit=15):
 
         kept = []
         for item in _iter_json_array(response.raw, b"departures"):
+            if not _matches_transport(item, transport):
+                continue
             kept.append(_to_departure(item))
             # Keep the list sorted and drop the latest departure when full
             kept.sort(key=_sort_key)

@@ -17,6 +17,7 @@ from screens.departure import (
 )
 
 from screens.settings import (
+    TRANSPORT_TYPES,
     create_settings_screen,
     set_stops,
     update_connection_status,
@@ -75,7 +76,7 @@ class Application:
         self.tile1_label = lv.label(self.tile1)
         self.tile1_label.set_text(
             "Karlskrona Transit\n\n"
-            "Version: 1.0\n"
+            "Version: 3\n"
             "Group 7\n\n"
             "Mustafa Ali Hussein Al-Soufi\n"
             "Berat Subasi\n"
@@ -92,9 +93,10 @@ class Application:
         self.departure_list = create_departure_screen(self.tile2)
         show_message(self.departure_list, "Loading...")
 
-        # Settings screen (US3.1) with the stop dropdown (US3.2B)
+        # Settings screen (US3.1) with the stop dropdown (US3.2B) and the
+        # transport type dropdown (US3.3)
         self.settings_screen = create_settings_screen(
-            self.tile3, "Loading...", self.on_stop_changed
+            self.tile3, "Loading...", self.on_stop_changed, self.on_transport_changed
         )
 
     def request_refresh(self, timer=None):
@@ -113,6 +115,17 @@ class Application:
         show_message(self.departure_list, "Loading...")
         self.refresh_pending = True  # poll_worker starts the fetch
         log("stop selected: " + self.selected_stop["name"])
+
+    def on_transport_changed(self, _event):
+        "Function: Called when the user picks another transport type (US3.3)"
+        index = self.settings_screen["transport"].get_selected()
+        if index >= len(TRANSPORT_TYPES):
+            return
+
+        self.worker.set_transport(TRANSPORT_TYPES[index])
+        show_message(self.departure_list, "Loading...")
+        self.refresh_pending = True  # poll_worker starts the fetch
+        log("transport selected: " + TRANSPORT_TYPES[index])
 
     def apply_stops(self, stops):
         "Function: Fills the stop dropdown with the stops from Trafiklab"
@@ -139,7 +152,8 @@ class Application:
         if stops:
             self.apply_stops(stops)
 
-        # A new stop was selected: drop the old result and fetch again
+        # A new stop or transport type was selected: drop the old result and
+        # fetch again
         if self.refresh_pending:
             self.worker.take_result()
             if self.worker.start():
