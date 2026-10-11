@@ -9,6 +9,8 @@ from debug_log import log
 
 from secrets import WIFI_SSID, WIFI_PASSWORD
 
+from config import settings_manager
+
 from screens.departure import (
     MAX_ROWS,
     create_departure_screen,
@@ -19,7 +21,10 @@ from screens.departure import (
 from screens.settings import (
     TRANSPORT_TYPES,
     create_settings_screen,
+    set_selected_stop,
     set_stops,
+    set_transport,
+    show_save_message,
     update_connection_status,
 )
 
@@ -29,6 +34,7 @@ from services.departure_worker import DepartureWorker
 # Town whose stops can be selected (US1.2B, US3.2B)
 TOWN = "Karlskrona"
 # Stop id (as a string) to show at start-up. None = the busiest stop in TOWN.
+# A stop saved with 'Save as Default' takes priority over this value.
 STOP_ID = None
 # Automatic refresh interval (US4.1). Trafiklab caches responses for 60 s.
 REFRESH_MS = 60_000
@@ -39,12 +45,19 @@ POLL_MS = 250
 class Application:
     def __init__(self):
         self.display, self.touch, self.handler = start_board()
-        self.worker = DepartureWorker(TOWN, STOP_ID, MAX_ROWS)
+
+        # Load the saved default settings (US3.4); the built-in defaults are
+        # used when nothing has been saved yet
+        saved = settings_manager.load()
+        self.worker = DepartureWorker(TOWN, saved["stop_id"] or STOP_ID, MAX_ROWS)
+        if saved["stop_id"]:
+            self.worker.stop_name = saved["stop_name"]
+        self.worker.set_transport(saved["transport"])
 
         # Application state for stop selection (US3.2B)
         self.stops = []  # selectable stops: dicts with 'id' and 'name'
         self.selected_stop = None  # the stop picked in the dropdown
-        self.refresh_pending = False  # True when a new stop needs a fetch
+        self.refresh_pending = False  # True when a new selection needs a fetch
 
         self.create_ui()
         self.connect_wifi()
@@ -93,10 +106,16 @@ class Application:
         self.departure_list = create_departure_screen(self.tile2)
         show_message(self.departure_list, "Loading...")
 
-        # Settings screen (US3.1) with the stop dropdown (US3.2B) and the
-        # transport type dropdown (US3.3)
+        # Settings screen (US3.1): stop dropdown (US3.2B), transport dropdown
+        # (US3.3) and the save / reset buttons (US3.4, US3.5)
         self.settings_screen = create_settings_screen(
-            self.tile3, "Loading...", self.on_stop_changed, self.on_transport_changed
+            self.tile3,
+            "Loading...",
+            self.on_stop_changed,
+            self.on_transport_changed,
+            self.on_save_clicked,
+            self.on_reset_clicked,
+            self.worker.transport,
         )
 
     def request_refresh(self, timer=None):
@@ -112,6 +131,7 @@ class Application:
 
         self.selected_stop = self.stops[index]
         self.worker.set_stop(self.selected_stop["id"], self.selected_stop["name"])
+        show_save_message(self.settings_screen, "")
         show_message(self.departure_list, "Loading...")
         self.refresh_pending = True  # poll_worker starts the fetch
         log("stop selected: " + self.selected_stop["name"])
@@ -123,15 +143,61 @@ class Application:
             return
 
         self.worker.set_transport(TRANSPORT_TYPES[index])
+        show_save_message(self.settings_screen, "")
         show_message(self.departure_list, "Loading...")
         self.refresh_pending = True  # poll_worker starts the fetch
         log("transport selected: " + TRANSPORT_TYPES[index])
+
+    def on_save_clicked(self, _event):
+        "Function: Saves the current stop and transport type as default (US3.4)"
+        if self.selected_stop is None:
+            show_save_message(self.settings_screen, "No stop to save yet", False)
+            return
+
+        ok = settings_manager.save(
+            {
+                "stop_id": self.selected_stop["id"],
+                "stop_name": self.selected_stop["name"],
+                "transport": self.worker.transport,
+            }
+        )
+        show_save_message(
+            self.settings_screen,
+            "Saved as default" if ok else "Could not save",
+            ok,
+        )
+        log("settings saved" if ok else "settings save failed")
+
+    def on_reset_clicked(self, _event):
+        "Function: Restores the saved default settings (US3.5)"
+        saved = settings_manager.load()
+
+        # Transport type
+        self.worker.set_transport(saved["transport"])
+        set_transport(self.settings_screen, saved["transport"])
+
+        # Stop: the saved one, else STOP_ID, else the busiest (first in list)
+        if self.stops:
+            wanted_id = saved["stop_id"] or STOP_ID
+            index = 0
+            for position, stop in enumerate(self.stops):
+                if stop["id"] == wanted_id:
+                    index = position
+            self.selected_stop = self.stops[index]
+            self.worker.set_stop(self.selected_stop["id"], self.selected_stop["name"])
+            set_selected_stop(self.settings_screen, index)
+
+        show_save_message(self.settings_screen, "Reset to default")
+        show_message(self.departure_list, "Loading...")
+        self.refresh_pending = True  # poll_worker starts the fetch
+        log("settings reset to default")
 
     def apply_stops(self, stops):
         "Function: Fills the stop dropdown with the stops from Trafiklab"
         current_id = self.worker.stop_id
 
-        # A stop set by STOP_ID may not be in the list: add it at the top
+        # A stop set by STOP_ID or saved earlier may not be in the list: add
+        # it at the top
         if current_id is not None and not any(s["id"] == current_id for s in stops):
             stops.insert(
                 0, {"id": current_id, "name": self.worker.stop_name or "Selected stop"}
