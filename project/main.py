@@ -1,13 +1,9 @@
 import sys
-import time
 
 import lvgl as lv
-import network
 
 from board_lvgl import start_board
 from debug_log import log
-
-from secrets import WIFI_SSID, WIFI_PASSWORD
 
 from config import settings_manager
 
@@ -33,10 +29,9 @@ from services.departure_worker import DepartureWorker
 
 # Town whose stops can be selected (US1.2B, US3.2B)
 TOWN = "Karlskrona"
-# Stop id (as a string) to show at start-up. None = the busiest stop in TOWN.
-# A stop saved with 'Save as Default' takes priority over this value.
+# Stop id to show at start-up. None = the busiest stop in TOWN.
 STOP_ID = None
-# Automatic refresh interval (US4.1). Trafiklab caches responses for 60 s.
+# Automatic refresh interval (US4.1)
 REFRESH_MS = 60_000
 # How often the UI checks if the background fetch has finished
 POLL_MS = 250
@@ -46,22 +41,20 @@ class Application:
     def __init__(self):
         self.display, self.touch, self.handler = start_board()
 
-        # Load the saved default settings (US3.4); the built-in defaults are
-        # used when nothing has been saved yet
+        # Load the saved default settings (US3.4)
         saved = settings_manager.load()
         self.worker = DepartureWorker(TOWN, saved["stop_id"] or STOP_ID, MAX_ROWS)
         if saved["stop_id"]:
             self.worker.stop_name = saved["stop_name"]
         self.worker.set_transport(saved["transport"])
 
-        # Application state for stop selection (US3.2B)
         self.stops = []  # selectable stops: dicts with 'id' and 'name'
         self.selected_stop = None  # the stop picked in the dropdown
-        self.refresh_pending = False  # True when a new selection needs a fetch
+        self.refresh_pending = False  # True when a new fetch must be started
 
         self.create_ui()
-        self.connect_wifi()
 
+        # Wi-Fi is managed by DepartureWorker in the background.
         # Timers must be stored on self so they are not garbage collected
         self.poll_timer = lv.timer_create(self.poll_worker, POLL_MS, None)
         self.refresh_timer = lv.timer_create(self.request_refresh, REFRESH_MS, None)
@@ -82,7 +75,6 @@ class Application:
         self.tileview.set_scrollbar_mode(lv.SCROLLBAR_MODE.OFF)
 
         self.tile1 = self.tileview.add_tile(0, 0, lv.DIR.RIGHT)
-        # Tile 2 can be swiped both ways: back to start, on to settings
         self.tile2 = self.tileview.add_tile(1, 0, lv.DIR.LEFT | lv.DIR.RIGHT)
         self.tile3 = self.tileview.add_tile(2, 0, lv.DIR.LEFT)
 
@@ -102,12 +94,13 @@ class Application:
         self.tile1_label.center()
         self.apply_tile_colors(self.tile1, self.tile1_label, False)
 
-        # Departure screen (US1.2B)
-        self.departure_list = create_departure_screen(self.tile2)
+        # Departure screen (US1.2B) with the refresh button (US4.2)
+        self.departure_list = create_departure_screen(
+            self.tile2, self.on_refresh_clicked
+        )
         show_message(self.departure_list, "Loading...")
 
-        # Settings screen (US3.1): stop dropdown (US3.2B), transport dropdown
-        # (US3.3) and the save / reset buttons (US3.4, US3.5)
+        # Settings screen (US3.1)
         self.settings_screen = create_settings_screen(
             self.tile3,
             "Loading...",
@@ -123,6 +116,12 @@ class Application:
         if not self.worker.start():
             log("refresh skipped: previous fetch still running")
 
+    def on_refresh_clicked(self, _event):
+        "Function: Called when the user presses Refresh (US4.2)"
+        show_message(self.departure_list, "Loading...")
+        self.refresh_pending = True  # poll_worker starts the fetch
+        log("manual refresh")
+
     def on_stop_changed(self, _event):
         "Function: Called when the user picks another stop in the dropdown"
         index = self.settings_screen["dropdown"].get_selected()
@@ -133,7 +132,7 @@ class Application:
         self.worker.set_stop(self.selected_stop["id"], self.selected_stop["name"])
         show_save_message(self.settings_screen, "")
         show_message(self.departure_list, "Loading...")
-        self.refresh_pending = True  # poll_worker starts the fetch
+        self.refresh_pending = True
         log("stop selected: " + self.selected_stop["name"])
 
     def on_transport_changed(self, _event):
@@ -145,7 +144,7 @@ class Application:
         self.worker.set_transport(TRANSPORT_TYPES[index])
         show_save_message(self.settings_screen, "")
         show_message(self.departure_list, "Loading...")
-        self.refresh_pending = True  # poll_worker starts the fetch
+        self.refresh_pending = True
         log("transport selected: " + TRANSPORT_TYPES[index])
 
     def on_save_clicked(self, _event):
@@ -171,8 +170,6 @@ class Application:
     def on_reset_clicked(self, _event):
         "Function: Restores the saved default settings (US3.5)"
         saved = settings_manager.load()
-
-        # Transport type
         self.worker.set_transport(saved["transport"])
         set_transport(self.settings_screen, saved["transport"])
 
@@ -189,15 +186,14 @@ class Application:
 
         show_save_message(self.settings_screen, "Reset to default")
         show_message(self.departure_list, "Loading...")
-        self.refresh_pending = True  # poll_worker starts the fetch
+        self.refresh_pending = True
         log("settings reset to default")
 
     def apply_stops(self, stops):
         "Function: Fills the stop dropdown with the stops from Trafiklab"
         current_id = self.worker.stop_id
 
-        # A stop set by STOP_ID or saved earlier may not be in the list: add
-        # it at the top
+        # A stop set by STOP_ID or saved earlier may be missing: add it on top
         if current_id is not None and not any(s["id"] == current_id for s in stops):
             stops.insert(
                 0, {"id": current_id, "name": self.worker.stop_name or "Selected stop"}
@@ -218,8 +214,7 @@ class Application:
         if stops:
             self.apply_stops(stops)
 
-        # A new stop or transport type was selected: drop the old result and
-        # fetch again
+        # New selection or manual refresh: drop the old result and fetch again
         if self.refresh_pending:
             self.worker.take_result()
             if self.worker.start():
@@ -236,25 +231,6 @@ class Application:
             self.settings_screen, wifi.is_connected(), departures is not None
         )
         log("departures: " + ("error" if departures is None else str(len(departures))))
-
-    @staticmethod
-    def connect_wifi():
-        "Function: Connects to WiFi"
-        log("connecting to Wi-Fi SSID: " + WIFI_SSID)
-        station = network.WLAN(network.STA_IF)
-        station.active(True)
-        station.connect(WIFI_SSID, WIFI_PASSWORD)
-        started = time.ticks_ms()
-        while (
-            not station.isconnected()
-            and time.ticks_diff(time.ticks_ms(), started) < 15_000
-        ):
-            time.sleep_ms(250)
-        log(
-            "Wi-Fi connected"
-            if station.isconnected()
-            else "Wi-Fi could not connect (timeout)"
-        )
 
 
 try:
