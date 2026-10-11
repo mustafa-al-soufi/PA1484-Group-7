@@ -40,7 +40,7 @@ class Application:
         self.tile1_label = lv.label(self.tile1)
         self.tile1_label.set_text(
             "Karlskrona Transit\n\n"
-            "Version: 1.0\n"
+            "Version: 3\n"
             "Group 7\n\n"
             "Mustafa Ali Hussein Al-Soufi\n"
             "Berat Subasi\n"
