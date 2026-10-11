@@ -9,13 +9,37 @@ from debug_log import log
 
 from secrets import WIFI_SSID, WIFI_PASSWORD
 
+from screens.departure import (
+    MAX_ROWS,
+    create_departure_screen,
+    show_message,
+    update_departures,
+)
+
+from services.departure_worker import DepartureWorker
+
+# Stop area to show departures for (US1.2B)
+STOP_NAME = "Karlskrona"
+# Set a stop id (as a string) to skip the name lookup
+STOP_ID = None
+# Automatic refresh interval (US4.1). Trafiklab caches responses for 60 s.
+REFRESH_MS = 60_000
+# How often the UI checks if the background fetch has finished
+POLL_MS = 250
+
 
 class Application:
     def __init__(self):
         self.display, self.touch, self.handler = start_board()
-        self.tile2_dark = False
+        self.worker = DepartureWorker(STOP_NAME, STOP_ID, MAX_ROWS)
         self.create_ui()
         self.connect_wifi()
+
+        # Timers must be stored on self so they are not garbage collected
+        self.poll_timer = lv.timer_create(self.poll_worker, POLL_MS, None)
+        self.refresh_timer = lv.timer_create(self.request_refresh, REFRESH_MS, None)
+        self.request_refresh()
+
         log("student application ready")
 
     @staticmethod
@@ -23,10 +47,6 @@ class Application:
         tile.set_style_bg_opa(lv.OPA.COVER, 0)
         tile.set_style_bg_color(lv.color_hex(0x000000 if dark else 0xFFFFFF), 0)
         label.set_style_text_color(lv.color_hex(0xFFFFFF if dark else 0x000000), 0)
-
-    def on_tile2_clicked(self, _event):
-        self.tile2_dark = not self.tile2_dark
-        self.apply_tile_colors(self.tile2, self.tile2_label, self.tile2_dark)
 
     def create_ui(self):
         "Function: Creates UI"
@@ -53,14 +73,24 @@ class Application:
         self.tile1_label.center()
         self.apply_tile_colors(self.tile1, self.tile1_label, False)
 
-        self.tile2_label = lv.label(self.tile2)
-        self.tile2_label.set_text("Welcome to the workshop")
-        self.tile2_label.set_style_text_font(lv.font_montserrat_28, 0)
-        self.tile2_label.set_style_text_align(lv.TEXT_ALIGN.CENTER, 0)
-        self.tile2_label.center()
-        self.apply_tile_colors(self.tile2, self.tile2_label, False)
-        self.tile2.add_flag(lv.obj.FLAG.CLICKABLE)
-        self.tile2.add_event_cb(self.on_tile2_clicked, lv.EVENT.CLICKED, None)
+        # Departure screen (US1.2B)
+        self.departure_list = create_departure_screen(self.tile2)
+        show_message(self.departure_list, "Loading...")
+
+    def request_refresh(self, timer=None):
+        "Function: Starts a background fetch of the departures (US4.1)"
+        if not self.worker.start():
+            log("refresh skipped: previous fetch still running")
+
+    def poll_worker(self, timer=None):
+        "Function: Updates the departure screen when a fetch has finished"
+        result = self.worker.take_result()
+        if result is None:
+            return  # still fetching, or nothing new
+
+        departures, error = result
+        update_departures(self.departure_list, departures, error)
+        log("departures: " + ("error" if departures is None else str(len(departures))))
 
     @staticmethod
     def connect_wifi():
