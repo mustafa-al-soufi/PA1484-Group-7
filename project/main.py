@@ -1,13 +1,9 @@
 import sys
-import time
 
 import lvgl as lv
-import network
 
 from board_lvgl import start_board
 from debug_log import log
-
-from secrets import WIFI_SSID, WIFI_PASSWORD
 
 from config import settings_manager
 
@@ -57,8 +53,8 @@ class Application:
         self.refresh_pending = False  # True when a new fetch must be started
 
         self.create_ui()
-        self.connect_wifi()
 
+        # Wi-Fi is managed by DepartureWorker in the background.
         # Timers must be stored on self so they are not garbage collected
         self.poll_timer = lv.timer_create(self.poll_worker, POLL_MS, None)
         self.refresh_timer = lv.timer_create(self.request_refresh, REFRESH_MS, None)
@@ -235,25 +231,6 @@ class Application:
             self.settings_screen, wifi.is_connected(), departures is not None
         )
         log("departures: " + ("error" if departures is None else str(len(departures))))
-
-    @staticmethod
-    def connect_wifi():
-        "Function: Connects to WiFi"
-        log("connecting to Wi-Fi SSID: " + WIFI_SSID)
-        station = network.WLAN(network.STA_IF)
-        station.active(True)
-        station.connect(WIFI_SSID, WIFI_PASSWORD)
-        started = time.ticks_ms()
-        while (
-            not station.isconnected()
-            and time.ticks_diff(time.ticks_ms(), started) < 15_000
-        ):
-            time.sleep_ms(250)
-        log(
-            "Wi-Fi connected"
-            if station.isconnected()
-            else "Wi-Fi could not connect (timeout)"
-        )
 
 
 try:
