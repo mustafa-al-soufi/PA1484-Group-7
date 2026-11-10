@@ -20,31 +20,61 @@ CHUNK_SIZE = 1024
 # A departure is "Delayed" when it is at least this many seconds late
 DELAY_THRESHOLD_S = 60
 
-# "All" means no transport filter. The API writes BUS, TRAIN and FERRY.
+# "All" means no transport filter
 TRANSPORT_ALL = "All"
 
-# A stop is in Karlskrona if one of its child stops is inside this box.
-# This removes look-alikes such as "Malmo Karlskronaplan".
+# The names in the app and the names the API uses for them. The API writes
+# BOAT for ferries, so "Ferry" must be translated.
+TRANSPORT_API_NAMES = {
+    "Bus": "BUS",
+    "Train": "TRAIN",
+    "Ferry": "BOAT",
+}
+
+# A stop must have a child stop inside this box. This removes stops with
+# the same name in other towns.
 AREA_LAT_MIN = 56.05
 AREA_LAT_MAX = 56.35
 AREA_LON_MIN = 15.45
 AREA_LON_MAX = 16.05
 
-# The API cannot list stops near a position, so we search for each locality
-# name instead. Add a name here if a stop is missing.
-SEARCH_TERMS = (
-    "Karlskrona",
-    "Lyckeby",
-    "Nättraby",
-    "Rödeby",
-    "Jämjö",
-    "Sturkö",
-    "Hasslö",
-    "Tjurkö",
-    "Torhamn",
-    "Ramdala",
-    "Trummenäs",
-    "Aspö",
+# The five stops that can be selected, in dropdown order. The first one is
+# shown at start-up when no default is saved.
+#   name:   the text shown in the app
+#   search: names sent to the API, tried in order until the stop is found
+#   match:  whole words that must be in the stop name, so "Karlskrona C"
+#           does not match "Karlskrona Campus Grasvik"
+STOPS = (
+    {
+        # Train and bus
+        "name": "Karlskrona Centralstation",
+        "search": ("Karlskrona",),
+        "match": ("karlskrona c", "karlskrona centralstation", "karlskrona station"),
+    },
+    {
+        # Bus, BTH campus
+        "name": "Campus Gräsvik",
+        "search": ("Gräsvik",),
+        "match": ("gräsvik",),
+    },
+    {
+        # Bus, the main bus hub in the city centre
+        "name": "Kungsplan",
+        "search": ("Kungsplan",),
+        "match": ("kungsplan",),
+    },
+    {
+        # Train and bus, the second train station in Karlskrona
+        "name": "Bergåsa station",
+        "search": ("Bergåsa",),
+        "match": ("bergåsa",),
+    },
+    {
+        # Ferry, the commuter boats to Sturkö and Trummenäs run all year
+        "name": "Handelshamnen",
+        "search": ("Handelshamnen",),
+        "match": ("handelshamnen",),
+    },
 )
 
 # Description of the last failure, "" if the last request worked
@@ -73,7 +103,11 @@ def _describe(error):
 
 
 def _url_encode(text):
-    """Make text safe for a URL, so 'Nättraby' becomes 'N%C3%A4ttraby'."""
+    """Make text safe for a URL.
+
+    Letters like å, ä and ö are not allowed in a URL, so they are replaced
+    with %-codes that the server turns back into the right letters.
+    """
     safe_chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_.~"
     encoded = ""
     for byte in text.encode("utf-8"):
@@ -191,86 +225,107 @@ def _in_area(group):
     return False
 
 
-def _stop_name(group):
-    """Return the real name of a stop area.
+def _padded(text):
+    """Lower-case ``text`` with spaces around every word, for word matching."""
+    text = str(text or "").lower()
+    for char in ",()-/":
+        text = text.replace(char, " ")
+    return " " + text + " "
 
-    The group name is used if a child stop has the same name. Otherwise it
-    is only a label, so the shortest child name is used.
-    """
-    name = group.get("name") or ""
-    shortest = None
+
+def _matches(group, words):
+    """Return True if the group name or a child name contains one of ``words``."""
+    names = [group.get("name")]
     for child in group.get("stops") or []:
-        child_name = child.get("name") or ""
-        if child_name == name:
-            return name
-        if child_name and (shortest is None or len(child_name) < len(shortest)):
-            shortest = child_name
-    return shortest or name
+        names.append(child.get("name"))
+
+    for name in names:
+        padded = _padded(name)
+        for word in words:
+            if " " + word + " " in padded:
+                return True
+    return False
 
 
-def _traffic_key(stop):
-    """Sort key that puts the busiest stops first."""
-    return -stop["traffic"]
+def _search(term, best):
+    """Search the API for ``term`` and update ``best`` with the stops found.
+
+    ``best`` has one place per entry in STOPS. Every stop area in the answer
+    is checked against all entries, so one search can find several stops.
+    If several stop areas match an entry, the busiest one is kept.
+    """
+    response = None
+    try:
+        gc.collect()
+        response = _open("stops/name/" + _url_encode(term))
+
+        for group in _iter_json_array(response.raw, b"stop_groups"):
+            if not _in_area(group):
+                continue
+
+            # Busy stop areas win. Areas without traffic and meta stops
+            # (a whole town) are only used if nothing better matches.
+            traffic = group.get("average_daily_stop_times") or 0
+            if group.get("area_type") == "META_STOP":
+                traffic = -1
+
+            for index, entry in enumerate(STOPS):
+                if not _matches(group, entry["match"]):
+                    continue
+                if best[index] is None or traffic > best[index]["traffic"]:
+                    best[index] = {
+                        "id": group.get("id"),
+                        "name": entry["name"],
+                        "traffic": traffic,
+                    }
+    finally:
+        if response is not None:
+            response.close()
+        gc.collect()
 
 
 def find_stops(town, limit=40):
-    """Find the stop areas in Karlskrona municipality.
+    """Find the stops in STOPS, in the same order as in STOPS.
 
-    The stops come from one name search per entry in SEARCH_TERMS, filtered
-    by coordinates. Meta stops (like "Karlskrona") and stops without traffic
-    are skipped. ``town`` is only used in the error text.
+    Each stop is searched with its own search names first and then with
+    ``town`` as a last try. A stop that cannot be found is skipped, so the
+    list can be shorter.
 
-    Returns a list of dicts with 'id', 'name' and 'traffic', busiest first,
-    or None if nothing could be fetched (see get_last_error).
+    Returns a list of dicts with 'id', 'name' and 'traffic', or None if no
+    stop could be found (see get_last_error).
     """
-    stops = []
-    seen_ids = set()
-    seen_names = set()
-    failures = 0
+    best = [None] * len(STOPS)
+    searched = []  # each name is only sent to the API once
     last_failure = ""
 
-    for term in SEARCH_TERMS:
-        response = None
-        try:
-            gc.collect()
-            response = _open("stops/name/" + _url_encode(term))
+    for index, entry in enumerate(STOPS):
+        for term in list(entry["search"]) + [town]:
+            if best[index] is not None:
+                break
+            if term in searched:
+                continue
+            searched.append(term)
+            try:
+                _search(term, best)
+            except Exception as error:
+                last_failure = _describe(error)
+                print("Trafiklab: search failed:", term, last_failure)
 
-            for group in _iter_json_array(response.raw, b"stop_groups"):
-                group_id = group.get("id")
-                traffic = group.get("average_daily_stop_times") or 0
-
-                if group.get("area_type") == "META_STOP":
-                    continue
-                if traffic <= 0 or group_id in seen_ids:
-                    continue
-                if not _in_area(group):
-                    continue
-
-                name = _stop_name(group)
-                if not name or name in seen_names:
-                    continue
-
-                seen_ids.add(group_id)
-                seen_names.add(name)
-                stops.append({"id": group_id, "name": name, "traffic": traffic})
-        except Exception as error:
-            failures += 1
-            last_failure = _describe(error)
-        finally:
-            if response is not None:
-                response.close()
-            gc.collect()
+    stops = []
+    for index, stop in enumerate(best):
+        if stop is None:
+            print("Trafiklab: stop not found:", STOPS[index]["name"])
+            continue
+        if any(found["id"] == stop["id"] for found in stops):
+            continue
+        print("Trafiklab: stop found:", stop["name"], stop["id"])
+        stops.append(stop)
 
     if not stops:
         _set_error(last_failure or "No stops found: " + town)
         return None
 
-    # A few failed searches are fine, the list is just shorter
-    if failures:
-        print("Trafiklab: %d stop searches failed" % failures)
     _clear_error()
-
-    stops.sort(key=_traffic_key)
     return stops[:limit]
 
 
@@ -289,7 +344,7 @@ def _matches_transport(item, transport):
         return True
     route = item.get("route") or {}
     mode = (route.get("transport_mode") or "").upper()
-    return mode == transport.upper()
+    return mode == TRANSPORT_API_NAMES.get(transport, transport.upper())
 
 
 def _to_departure(item):
