@@ -14,7 +14,12 @@ from screens.departure import (
     update_departures,
 )
 
-from screens.journey import create_journey_screen
+from screens.journey import (
+    create_journey_screen,
+    get_journey_selection,
+    set_journey_stops,
+    show_journey_message,
+)
 
 from screens.settings import (
     TRANSPORT_TYPES,
@@ -53,6 +58,8 @@ class Application:
         self.stops = []  # selectable stops: dicts with 'id' and 'name'
         self.selected_stop = None  # the stop picked in the dropdown
         self.refresh_pending = False  # True when a new fetch must be started
+        self.journey_from = None  # start stop of the journey search (US5.2)
+        self.journey_to = None  # destination stop of the journey search
 
         self.create_ui()
 
@@ -114,8 +121,8 @@ class Application:
             self.worker.transport,
         )
 
-        # Journey screen (US5.1)
-        self.journey_screen = create_journey_screen(self.tile4)
+        # Journey screen (US5.1) with the stop selection (US5.2)
+        self.journey_screen = create_journey_screen(self.tile4, self.on_search_clicked)
 
     def request_refresh(self, timer=None):
         "Function: Starts a background fetch of the departures (US4.1)"
@@ -211,8 +218,33 @@ class Application:
             if stop["id"] == current_id:
                 selected = index
         self.selected_stop = stops[selected]
-        set_stops(self.settings_screen, [stop["name"] for stop in stops], selected)
+        names = [stop["name"] for stop in stops]
+        set_stops(self.settings_screen, names, selected)
+        set_journey_stops(self.journey_screen, names)
         log("stops loaded: " + str(len(stops)))
+
+    def on_search_clicked(self, _event):
+        "Function: Called when the user presses Search on the journey screen (US5.2)"
+        if not self.stops:
+            show_journey_message(self.journey_screen, "Stops are still loading", False)
+            return
+
+        from_index, to_index = get_journey_selection(self.journey_screen)
+        if from_index >= len(self.stops) or to_index >= len(self.stops):
+            return
+        if from_index == to_index:
+            show_journey_message(
+                self.journey_screen, "Choose two different stops", False
+            )
+            return
+
+        self.journey_from = self.stops[from_index]
+        self.journey_to = self.stops[to_index]
+        show_journey_message(
+            self.journey_screen,
+            self.journey_from["name"] + " -> " + self.journey_to["name"],
+        )
+        log("journey: " + self.journey_from["name"] + " -> " + self.journey_to["name"])
 
     def poll_worker(self, timer=None):
         "Function: Updates the screens when a background fetch has finished"
