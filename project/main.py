@@ -8,8 +8,13 @@ from debug_log import log
 from config import settings_manager
 
 from screens.departure import (
+    COLOR_MUTED,
+    COLOR_TEXT,
+    FONT_BIG,
+    FONT_SMALL,
     MAX_ROWS,
     create_departure_screen,
+    make_label,
     show_message,
     update_departures,
 )
@@ -39,6 +44,15 @@ from services.departure_worker import DepartureWorker
 TOWN = "Karlskrona"
 # Stop id to show at start-up. None = the first stop in the list.
 STOP_ID = None
+# Shown on the start screen (US1.1)
+VERSION = "4"
+MEMBERS = (
+    "Mustafa Ali Hussein Al-Soufi",
+    "Berat Subasi",
+    "Emanuel Gabro",
+    "Ahmad Elhassen",
+    "Ismail Alkhasara",
+)
 # Automatic refresh interval (US4.1)
 REFRESH_MS = 60_000
 # How often the UI checks if the background fetch has finished
@@ -59,25 +73,41 @@ class Application:
         self.stops = []  # selectable stops: dicts with 'id' and 'name'
         self.selected_stop = None  # the stop picked in the dropdown
         self.refresh_pending = False  # True when a new fetch must be started
-        self.journey_from = None  # start stop of the journey search (US5.2)
-        self.journey_to = None  # destination stop of the journey search
-        self.journey_pending = False  # True when a journey search must start
+        self.journey_from = None  # stops of the journey search (US5.2)
+        self.journey_to = None
+        self.journey_pending = False  # True when a search must start
 
         self.create_ui()
 
-        # Wi-Fi is managed by DepartureWorker in the background.
-        # Timers must be stored on self so they are not garbage collected
+        # Timers are kept on self so they are not garbage collected
         self.poll_timer = lv.timer_create(self.poll_worker, POLL_MS, None)
         self.refresh_timer = lv.timer_create(self.request_refresh, REFRESH_MS, None)
         self.request_refresh()
 
         log("student application ready")
 
-    @staticmethod
-    def apply_tile_colors(tile, label, dark):
+    def create_start_screen(self):
+        "Function: Start screen with name, version, group and members (US1.1)"
+        tile = self.tile1
         tile.set_style_bg_opa(lv.OPA.COVER, 0)
-        tile.set_style_bg_color(lv.color_hex(0x000000 if dark else 0xFFFFFF), 0)
-        label.set_style_text_color(lv.color_hex(0xFFFFFF if dark else 0x000000), 0)
+        tile.set_style_bg_color(lv.color_hex(0x000000), 0)
+        tile.set_style_pad_row(12, 0)
+        tile.set_flex_flow(lv.FLEX_FLOW.COLUMN)
+        tile.set_flex_align(
+            lv.FLEX_ALIGN.CENTER, lv.FLEX_ALIGN.CENTER, lv.FLEX_ALIGN.CENTER
+        )
+        make_label(tile, "Karlskrona Transit", 0, FONT_BIG, COLOR_TEXT)
+        make_label(
+            tile, "Version " + VERSION + " | Group 7", 0, FONT_SMALL, COLOR_MUTED
+        )
+
+        card = lv.obj(tile)
+        card.set_size(380, lv.SIZE_CONTENT)
+        card.set_style_bg_color(lv.color_hex(0x1B2A41), 0)
+        card.set_style_border_width(0, 0)
+        names = make_label(card, "\n".join(MEMBERS), 348, FONT_BIG, COLOR_TEXT)
+        names.set_style_text_align(lv.TEXT_ALIGN.CENTER, 0)
+        make_label(tile, "Swipe left for departures >", 0, FONT_SMALL, COLOR_MUTED)
 
     def create_ui(self):
         "Function: Creates UI"
@@ -90,21 +120,8 @@ class Application:
         self.tile3 = self.tileview.add_tile(2, 0, lv.DIR.LEFT | lv.DIR.RIGHT)
         self.tile4 = self.tileview.add_tile(3, 0, lv.DIR.LEFT)
 
-        self.tile1_label = lv.label(self.tile1)
-        self.tile1_label.set_text(
-            "Karlskrona Transit\n\n"
-            "Version: 3\n"
-            "Group 7\n\n"
-            "Mustafa Ali Hussein Al-Soufi\n"
-            "Berat Subasi\n"
-            "Emanuel Gabro\n"
-            "Ahmad Elhassen\n"
-            "Ismail Alkhasara"
-        )
-        self.tile1_label.set_style_text_font(lv.font_montserrat_20, 0)
-        self.tile1_label.set_style_text_align(lv.TEXT_ALIGN.CENTER, 0)
-        self.tile1_label.center()
-        self.apply_tile_colors(self.tile1, self.tile1_label, False)
+        # Start screen (US1.1)
+        self.create_start_screen()
 
         # Departure screen (US1.2B) with the refresh button (US4.2)
         self.departure_list = create_departure_screen(
@@ -128,12 +145,8 @@ class Application:
 
     def request_refresh(self, timer=None):
         "Function: Starts a background fetch of the departures (US4.1)"
-        try:
-            if not self.worker.start():
-                log("refresh skipped: previous fetch still running")
-        except Exception as error:
-            log("refresh error: %r" % (error,))
-            sys.print_exception(error)
+        if not self.worker.start():
+            log("refresh skipped: previous fetch still running")
 
     def on_refresh_clicked(self, _event):
         "Function: Called when the user presses Refresh (US4.2)"
@@ -212,7 +225,7 @@ class Application:
         "Function: Fills the stop dropdown with the stops from Trafiklab"
         current_id = self.worker.stop_id
 
-        # A stop set by STOP_ID or saved earlier may be missing: add it on top
+        # A saved stop may be missing from the list: add it on top
         if current_id is not None and not any(s["id"] == current_id for s in stops):
             stops.insert(
                 0, {"id": current_id, "name": self.worker.stop_name or "Selected stop"}
@@ -259,8 +272,7 @@ class Application:
         try:
             self.check_worker()
         except Exception as error:
-            # An error inside an LVGL timer can stop the screen from updating,
-            # so it is caught here and shown instead
+            # An error in an LVGL timer can stop the screen, so show it instead
             log("poll error: %r" % (error,))
             sys.print_exception(error)
             show_message(self.departure_list, "Error: %r" % (error,))
@@ -278,7 +290,7 @@ class Application:
             show_trips(self.journey_screen, trips, "Could not fetch journeys\n" + error)
             log("journeys: " + ("error" if trips is None else str(len(trips))))
 
-        # New selection or manual refresh: drop the old result and fetch again
+        # New selection or refresh: drop the old result and fetch again
         if self.refresh_pending:
             self.worker.take_result()
             if self.worker.start():
