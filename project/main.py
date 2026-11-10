@@ -14,6 +14,8 @@ from screens.departure import (
     update_departures,
 )
 
+from screens.journey import create_journey_screen
+
 from screens.settings import (
     TRANSPORT_TYPES,
     create_settings_screen,
@@ -29,7 +31,7 @@ from services.departure_worker import DepartureWorker
 
 # Town whose stops can be selected (US1.2B, US3.2B)
 TOWN = "Karlskrona"
-# Stop id to show at start-up. None = the busiest stop in TOWN.
+# Stop id to show at start-up. None = the first stop in the list.
 STOP_ID = None
 # Automatic refresh interval (US4.1)
 REFRESH_MS = 60_000
@@ -76,7 +78,8 @@ class Application:
 
         self.tile1 = self.tileview.add_tile(0, 0, lv.DIR.RIGHT)
         self.tile2 = self.tileview.add_tile(1, 0, lv.DIR.LEFT | lv.DIR.RIGHT)
-        self.tile3 = self.tileview.add_tile(2, 0, lv.DIR.LEFT)
+        self.tile3 = self.tileview.add_tile(2, 0, lv.DIR.LEFT | lv.DIR.RIGHT)
+        self.tile4 = self.tileview.add_tile(3, 0, lv.DIR.LEFT)
 
         self.tile1_label = lv.label(self.tile1)
         self.tile1_label.set_text(
@@ -110,6 +113,9 @@ class Application:
             self.on_reset_clicked,
             self.worker.transport,
         )
+
+        # Journey screen (US5.1)
+        self.journey_screen = create_journey_screen(self.tile4)
 
     def request_refresh(self, timer=None):
         "Function: Starts a background fetch of the departures (US4.1)"
@@ -173,7 +179,7 @@ class Application:
         self.worker.set_transport(saved["transport"])
         set_transport(self.settings_screen, saved["transport"])
 
-        # Stop: the saved one, else STOP_ID, else the busiest (first in list)
+        # Stop: the saved one, else STOP_ID, else the first in the list
         if self.stops:
             wanted_id = saved["stop_id"] or STOP_ID
             index = 0
