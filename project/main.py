@@ -19,6 +19,7 @@ from screens.journey import (
     get_journey_selection,
     set_journey_stops,
     show_journey_message,
+    show_trips,
 )
 
 from screens.settings import (
@@ -60,6 +61,7 @@ class Application:
         self.refresh_pending = False  # True when a new fetch must be started
         self.journey_from = None  # start stop of the journey search (US5.2)
         self.journey_to = None  # destination stop of the journey search
+        self.journey_pending = False  # True when a journey search must start
 
         self.create_ui()
 
@@ -126,8 +128,12 @@ class Application:
 
     def request_refresh(self, timer=None):
         "Function: Starts a background fetch of the departures (US4.1)"
-        if not self.worker.start():
-            log("refresh skipped: previous fetch still running")
+        try:
+            if not self.worker.start():
+                log("refresh skipped: previous fetch still running")
+        except Exception as error:
+            log("refresh error: %r" % (error,))
+            sys.print_exception(error)
 
     def on_refresh_clicked(self, _event):
         "Function: Called when the user presses Refresh (US4.2)"
@@ -244,19 +250,45 @@ class Application:
             self.journey_screen,
             self.journey_from["name"] + " -> " + self.journey_to["name"],
         )
+        show_trips(self.journey_screen, None, "Searching...")
+        self.journey_pending = True  # poll_worker starts the search (US5.3)
         log("journey: " + self.journey_from["name"] + " -> " + self.journey_to["name"])
 
     def poll_worker(self, timer=None):
+        "Function: Runs check_worker, so an error can never stop the display"
+        try:
+            self.check_worker()
+        except Exception as error:
+            # An error inside an LVGL timer can stop the screen from updating,
+            # so it is caught here and shown instead
+            log("poll error: %r" % (error,))
+            sys.print_exception(error)
+            show_message(self.departure_list, "Error: %r" % (error,))
+
+    def check_worker(self):
         "Function: Updates the screens when a background fetch has finished"
         stops = self.worker.take_stops()
         if stops:
             self.apply_stops(stops)
+
+        # A journey search has finished (US5.3)
+        journey = self.worker.take_journey()
+        if journey is not None:
+            trips, error = journey
+            show_trips(self.journey_screen, trips, "Could not fetch journeys\n" + error)
+            log("journeys: " + ("error" if trips is None else str(len(trips))))
 
         # New selection or manual refresh: drop the old result and fetch again
         if self.refresh_pending:
             self.worker.take_result()
             if self.worker.start():
                 self.refresh_pending = False
+            return
+
+        # Search pressed: start the journey search when the worker is free
+        if self.journey_pending:
+            if self.worker.start((self.journey_from["id"], self.journey_to["id"])):
+                self.journey_pending = False
             return
 
         result = self.worker.take_result()

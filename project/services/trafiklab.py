@@ -1,4 +1,4 @@
-"""Trafiklab Realtime API: find stops and get departures.
+"""Trafiklab Realtime API (stops, departures) and ResRobot (journeys, US5.3).
 
 The ESP32 has little memory, so the answers are read in small chunks and
 one JSON object at a time. All functions block, so only call them from the
@@ -10,7 +10,7 @@ import json
 
 import urequests
 
-from secrets import TRAFIKLAB_API_KEY
+from secrets import RESROBOT_API_KEY, TRAFIKLAB_API_KEY
 
 BASE_URL = "https://realtime-api.trafiklab.se/v1/"
 
@@ -396,6 +396,98 @@ def get_departures(stop_id, limit=15, transport=TRANSPORT_ALL):
 
         _clear_error()
         return kept
+    except Exception as error:
+        _set_error(_describe(error))
+        return None
+    finally:
+        if response is not None:
+            response.close()
+        gc.collect()
+
+
+# ResRobot travel planner (US5.3). It uses the same stop ids.
+TRIP_URL = "https://api.resrobot.se/v2.1/trip?format=json&passlist=0&numF="
+
+
+def _as_list(value):
+    """ResRobot gives a list for many items but a single object for one."""
+    if isinstance(value, list):
+        return value
+    return [value] if value else []
+
+
+def _place(place, key):
+    """Return a field of an Origin or Destination, '' if missing."""
+    return (place or {}).get(key) or ""
+
+
+# Words in ResRobot line names and the transport types used in the app (US3.3)
+LINE_TYPES = (("buss", "Bus"), ("tåg", "Train"), ("båt", "Ferry"), ("färja", "Ferry"))
+
+
+def _line_name(name):
+    """Turn "Länstrafik - Buss 6" into "Bus 6" and "Öresundståg 1076" into "Train 1076"."""
+    lower = name.lower()
+    number = name.split(" ")[-1]
+    for word, label in LINE_TYPES:
+        if word in lower:
+            return label + " " + number if number.isdigit() else label
+    return name
+
+
+def _to_trip(trip):
+    """Keep only what the screen shows. Only JNY legs are rides."""
+    legs = _as_list((trip.get("LegList") or {}).get("Leg"))
+    if not legs:
+        return None
+    rides = []
+    for leg in legs:
+        if leg.get("type") != "JNY":
+            continue
+        stop = _place(leg.get("Origin"), "name")
+        line = _line_name(leg.get("name") or "")
+        rides.append(
+            {
+                "time": _place(leg.get("Origin"), "time")[:5],
+                "stop": stop.split(" (")[0],  # drop "(Karlskrona kn)"
+                "line": line,
+            }
+        )
+    return {
+        "departure": _place(legs[0].get("Origin"), "time")[:5],
+        "arrival": _place(legs[-1].get("Destination"), "time")[:5],
+        "changes": max(len(rides) - 1, 0),
+        "rides": rides,
+    }
+
+
+def get_trips(origin_id, dest_id, limit=5):
+    """Get the next journeys between two stops, or None if it failed."""
+    url = (
+        TRIP_URL
+        + str(limit)
+        + "&originId="
+        + str(origin_id)
+        + "&destId="
+        + str(dest_id)
+        + "&accessId="
+        + RESROBOT_API_KEY
+    )
+    response = None
+    try:
+        gc.collect()
+        response = urequests.get(url)
+        if response.status_code != 200:
+            raise Exception("HTTP " + str(response.status_code))
+        trips = []
+        for item in _iter_json_array(response.raw, b"Trip"):
+            trip = _to_trip(item)
+            if trip is not None:
+                trips.append(trip)
+            if len(trips) >= limit:
+                break
+        _clear_error()
+        return trips
     except Exception as error:
         _set_error(_describe(error))
         return None
