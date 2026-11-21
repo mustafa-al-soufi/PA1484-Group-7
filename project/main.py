@@ -12,7 +12,7 @@ from screens.departure import (
     show_message, update_departures,
 )
 from screens.journey import (
-    create_journey_screen, get_journey_selection, set_journey_stops,
+    create_journey_screen, get_journey_selection, set_journey_side,
     show_journey_message, show_trips,
 )
 from screens.settings import (
@@ -51,12 +51,17 @@ class Application:
         self.selected_stop = self.journey_from = self.journey_to = None
         # Set: poll_worker starts a fetch / journey search (US5.2)
         self.refresh_pending = self.journey_pending = False
-        self.search_pending = None  # text of a stop search to start (US3.2C)
+        # A stop search to start: (side, text); side = "stop" (settings, US3.2C),
+        # "from" or "to" (journey, US5.2B). search_side: the one running.
+        self.search_pending = self.search_side = None
+        self.trip_stops = {}  # the From and To dropdowns' own stops (US5.2B)
         self.refreshing = False  # Refresh pressed: show the result (US4.2B)
         self.last_error = None  # an error is only logged once
 
         self.create_ui()
         self.apply_stops(trafiklab.get_stops())  # fixed stops, no search
+        self.set_trip_stops("from", trafiklab.get_stops())
+        self.set_trip_stops("to", trafiklab.get_stops(), 1)
         # Kept on self so they are not garbage collected
         self.poll_timer = lv.timer_create(self.poll_worker, POLL_MS, None)
         # US4.1
@@ -97,7 +102,7 @@ class Application:
             self.on_transport_changed, self.on_save_clicked, self.on_reset_clicked,
             self.worker.transport, self.on_stop_search, self.on_refresh_clicked)
         self.journey_screen = create_journey_screen(  # US5.1, US5.2
-            tiles.add_tile(3, 0, lv.DIR.LEFT), self.on_search_clicked)
+            tiles.add_tile(3, 0, lv.DIR.LEFT), self.on_search_clicked, self.stop_search)
 
         # The fetch waits during swipes and journey scrolling
         for widget in (tiles, self.journey_screen["results"]):
@@ -189,45 +194,59 @@ class Application:
             stops.insert(0, {"id": self.worker.stop_id, "name": self.worker.stop_name or "Selected stop"})
             selected = 0
         self.selected_stop = stops[selected]
-        names = [stop["name"] for stop in stops]
-        set_stops(self.settings_screen, names, selected)
-        set_journey_stops(self.journey_screen, names)
+        set_stops(self.settings_screen, [stop["name"] for stop in stops], selected)
+
+    def set_trip_stops(self, side, stops, selected=0):
+        "Fills the From or To dropdown (US5.2B)"
+        self.trip_stops[side] = stops
+        set_journey_side(self.journey_screen, side, [stop["name"] for stop in stops], selected)
 
     def on_stop_search(self, text):
-        "Stop search (US3.2C); an empty search brings back the fixed stops"
+        self.stop_search("stop", text)
+
+    def stop_search(self, side, text):
+        "Stop search for ``side`` (see search_pending); empty = the fixed stops"
         text = text.strip()
         if text:
-            self.search_pending = text  # poll_worker starts it
-            show_save_message(self.settings_screen, "Searching...")
+            self.search_pending = (side, text)  # poll_worker starts it
+            self.search_message(side, "Searching...")
         else:
-            self.apply_stops(trafiklab.get_stops())
-            show_save_message(self.settings_screen, "")
+            self.show_found_stops(side, trafiklab.get_stops(), "")
 
-    def show_found_stops(self, stops):
-        "The stop search finished: the stops go into the dropdown, opened"
-        screen = self.settings_screen
+    def search_message(self, side, text, ok=True):
+        if side == "stop":
+            show_save_message(self.settings_screen, text, ok)
+        else:
+            show_journey_message(self.journey_screen, text, ok)
+
+    def show_found_stops(self, side, stops, text=None):
+        "A stop search finished: the stops go into that side's dropdown, opened"
         if not stops:
-            show_save_message(screen, "Search failed" if stops is None else "No stops found", False)
+            self.search_message(side, "Search failed" if stops is None else "No stops found", False)
             return
-        count = len(stops)
-        self.apply_stops(stops)
-        show_save_message(screen, "%d stops found" % count)
-        screen["stop_dropdown"].open()
+        self.search_message(side, "%d stops found" % len(stops) if text is None else text)
+        if side == "stop":
+            self.apply_stops(stops)
+            dropdown = self.settings_screen["stop_dropdown"]
+        else:
+            self.set_trip_stops(side, stops)
+            dropdown = self.journey_screen[side]
+        if text is None:
+            dropdown.open()
 
     def on_search_clicked(self, _event):
         "Search pressed on the journey screen (US5.2)"
-        screen = self.journey_screen
-        if not self.stops:
+        screen, trips = self.journey_screen, self.trip_stops
+        if not (trips.get("from") and trips.get("to")):
             show_journey_message(screen, "Stops are still loading", False)
             return
         from_index, to_index = get_journey_selection(screen)
-        if max(from_index, to_index) >= len(self.stops):
+        if from_index >= len(trips["from"]) or to_index >= len(trips["to"]):
             return
-        if from_index == to_index:
+        self.journey_from, self.journey_to = trips["from"][from_index], trips["to"][to_index]
+        if self.journey_from["id"] == self.journey_to["id"]:
             show_journey_message(screen, "Choose two different stops", False)
             return
-        self.journey_from = self.stops[from_index]
-        self.journey_to = self.stops[to_index]
         show_journey_message(screen, self.journey_from["name"] + " -> " + self.journey_to["name"])
         show_trips(screen, None, "Searching...")
         self.journey_pending = True  # US5.3
@@ -250,10 +269,11 @@ class Application:
             return  # nothing new is drawn during a swipe
         journey = self.worker.take_journey()  # US5.3
         if journey is not None:
-            show_trips(self.journey_screen, journey[0], "Could not fetch journeys\n" + journey[1])
-        found = self.worker.take_stops()  # US3.2C
+            show_trips(self.journey_screen, best_first(journey[0]),
+                       "Could not fetch journeys\n" + journey[1])
+        found = self.worker.take_stops()  # US3.2C, US5.2B
         if found is not None:
-            self.show_found_stops(found[0])
+            self.show_found_stops(self.search_side, found[0])
         if self.refresh_pending:  # drop the old result, fetch again
             self.worker.take_result()
             self.refresh_pending = not self.worker.start()
@@ -263,8 +283,9 @@ class Application:
                 (self.journey_from["id"], self.journey_to["id"]))
             return
         if self.search_pending:
-            if self.worker.start(search=self.search_pending):
-                self.search_pending = None
+            side, text = self.search_pending
+            if self.worker.start(search=text):
+                self.search_side, self.search_pending = side, None
             return
         result = self.worker.take_result()
         if result is not None:
@@ -275,6 +296,18 @@ class Application:
                 self.refreshing = False
                 show_save_message(self.settings_screen, "Departures updated" if departures is not None
                                   else "Refresh failed", departures is not None)
+
+
+def best_first(trips):
+    """US5.3B: the journeys by arrival at the destination, earliest first; the
+    first is marked "best". An arrival before the earliest departure is after
+    midnight, so it sorts last."""
+    if not trips:
+        return trips
+    start = min(trip["departure"] for trip in trips)
+    trips = sorted(trips, key=lambda t: ("1" if t["arrival"] < start else "0") + t["arrival"])
+    trips[0]["best"] = True
+    return trips
 
 
 def show_fatal(error):
