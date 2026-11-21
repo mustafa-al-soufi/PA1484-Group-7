@@ -2,15 +2,15 @@
 
 import lvgl as lv
 
-# Like a departure board: pages, no scrolling. 6 rows of 50 px fit in the
-# list. The rows are made once, a page change only changes their text.
+# Pages, no scrolling: 6 rows of 50 px fit. Rows are made once, a page
+# change only changes their text.
 MAX_ROWS = 6
 MAX_PAGES = 2
 MAX_DEPARTURES = MAX_ROWS * MAX_PAGES  # kept, and so fetched
 
 MAX_DESTINATION_CHARS = 16  # longer destinations are cut
 
-# The built-in fonts have no å, ä or ö. Set to False if you use another font.
+# å ä ö Ø ø Æ æ become ASCII, unless load_swedish_fonts() works
 REPLACE_SWEDISH_CHARS = True
 
 FONT_BIG = lv.font_montserrat_20
@@ -37,32 +37,119 @@ PAGE_LABEL_WIDTH = 44
 ROW_HEIGHT = 50
 ROW_GAP = 2
 ROW_PAD = 4
-FALLBACK_LINE_HEIGHT = 22  # FONT_BIG line height, if the font cannot tell
+FALLBACK_LINE_HEIGHT = 22  # if the font cannot tell
 
-# Labels that never wrap use CLIP, so LVGL does not break their text into
-# lines. LVGL 9.3 calls it LONG_MODE, older versions LONG.
+# CLIP: LVGL does not break the text into lines (9.3: LONG_MODE, older: LONG)
 _LONG_MODES = getattr(lv.label, "LONG_MODE", None) or getattr(lv.label, "LONG", None)
 LONG_CLIP = getattr(_LONG_MODES, "CLIP", None)
 
 STATUS_COLORS = {"On time": COLOR_OK, "Delayed": COLOR_DELAYED, "Canceled": COLOR_CANCELED}
 
-ATTRIBUTION = "Data: Trafiklab.se (CC BY 4.0)"  # required by the license (NF3)
+ATTRIBUTION = "Data: Trafiklab.se (CC BY 4.0)"  # license (NF3)
 
-_CHAR_MAP = {"å": "a", "ä": "a", "ö": "o", "Å": "A", "Ä": "A", "Ö": "O"}
+# Built-in fonts: ASCII and LVGL symbols only; safe_text maps the rest
+_FONT_LETTERS = "åäöÅÄÖØøÆæ"  # in the small fonts: kept when they are loaded
+_CHAR_MAP = {
+    "å": "a", "ä": "a", "ö": "o", "Å": "A", "Ä": "A", "Ö": "O",
+    "Ø": "O", "ø": "o", "Æ": "AE", "æ": "ae", "é": "e", "è": "e", "ë": "e", "ü": "u",
+    "\u2013": "-", "\u2014": "-", "\u2018": "'", "\u2019": "'", "\u201c": '"',
+    "\u201d": '"', "\u00a0": " ",
+}
+_reported = set()  # characters without a glyph, printed once
+
+
+# Binfonts with only å ä ö Å Ä Ö Ø ø Æ æ (lv_font_conv 1.5.2, Montserrat-Medium,
+# 4 bpp, 24/4 and 18/3 so Å fits), the built-in font as fallback. zlib +
+# base64, written to the flash at start-up: no blocks in the 128 KB image.
+FONT_DIR = "/"
+_SV20 = (
+    "eNq9VE1oE0EUfrvp5q9p2GiFHsQm0pMHs5UKKtLtIYIHaeLJg0JSWn/AlMSLWBTMwXMbPIggmNaTBCXBuzQURdFKcrCIVthKvdhWNm3aWptsxvdmsmqhN8FZhm/y9n3f+2b2TTQAuHJxaERCdEAnPg22F+oMoMk6MabihDZZcSJQjoZzeHQoTev9OF/gPIpvvMimDBn2oEYQQnAQjkAf9GA0mRoeakd04/MA+qX3UkqWHTHHY4e/7WobwGucl5Njl/RQECA+8JDXTMWmOVKhHcPM"
+    "cFDYAseO7U2O0SmL47RWiCHIDdBLiN4N8NUQuxdAqSNOpFEBy5gMRxacVj6fL6xCB+V4tiBeJG4TygOkVUjoIVzI77Jc2qfd24Hy8yzsOv6rxXOHqIrEs7colDNXZmdnE7gKz223HPnW45NipWwrdtAM2sGJjEJ0/BVegDjSXwG0b0Ar035HlHz+iQhO4N4FHSmgNLHkG6RgkLIrkZD259tFE7kgoR4bD+5yXFLSXKYDGWTfmaVhubvgmF6Dbjo1j8UrARgxQ+N9Mck4SS/ZaMft"
+    "PJunsEdcB3Ut0gXpFq8TmWqZeCrAWRMWbmeEBSYseJmwEB4TFt4KC+5VYUFPCAufhAXPF2EhGuMWfiy1LNSEhZywIC0JC96KKN3VctLbWfUVD6fBX9Ezfx3MeXN5wMXmjQ15ClxNvrsgBAJlbRyP+HhjJFLWq9hO/avgYMes6zlTS7KXOa13nwqjM9gkpTP4ZTJ+Wp1EMsX+RfdsTxGZmttYChJ701gRCth2CqPLamBrpjKkdC0QCJdIjca3OireiUQiUVQ1qGf868j6qcINF/ts"
+    "zphW2YIL5gdwG1Ya+rqqrT+BVKyg7uyUE+ZHFYizCPGvaF2lS5BL0xb0Zw26QxW+Lop4lOeIfMHtu18lHRfXvUnB+TUuWCPBFAlKiyToyZLgIBecI8HTkyTI1N+CzjoJHuDNd4q7+wVaj6U8"
+)
+_SV14 = (
+    "eNqtkT9oE3EUx7+/NEd61vSMsaWFWn4Gl2KHIK2LcEmhg1YXh4JkqAmp16KVaHFRsdZFooPoWjB3luIgEhfRoZBEcOikDvUvJh7hKLGUDCIdtOnP9xKpq4N3vPfufu/7/fx+9y4KYPpsalJQbUMnDDRUJ7YUoJRBa3so4Bd+jQprohTpC6mL/NxH8YpimDq7yM0KH/ZiHyQOIILDGMJBWp3JpFMdVNvpPo1nEOKUeCjeCOE76sv4AIdiauaKNb4AcS7BGy7txs7VW+V8I8/42S+U"
+    "Na/PAcJxg7KZFDU+qtqEeG1ZuXiHSw7ZK4FgdTwHhCLsfhz9m8OR/8G+/gPNnooDsYmV7C2ga8pjWsCbizPvbkCpbYnPmHtkJbFfKe6GLKtCXW0NgY1s9uZl2lyprRR9+NJzNpfGds5m2O8dCHvww3d00ZQLJbNEezg5sgfdVm6ttLqspDMZRXKlFxjQnuSckET6VGPS1yYpUSGSyDLJkExKMOlllknvJJPUSSKJF0wKNY8y0i3uXAUWB5tvur0qu2vLRNdd/UHZi/kHvJzUPdO9"
+    "5unFp95ID4ZHgRWaNtd/cFx6q9ubh4p5kKhSa7BjA3qVpI1yec30BtYjEZmTQZ557Fj5zNgyIfNMPX4Eqz3z8M8v/hla8QnC9ft1bR2GW6B/eN6lYU842Bbmt34Xv36WcGKIhLMkLchw3SZpW8YtiFGS3iPpR5LGbve7GknFZBP6Gxzn7QI="
+)
+_swedish = {}  # id(built-in font) -> Swedish font
+_fs_driver = None  # must stay alive
+
+
+def ui_font(font):
+    """The Swedish version of a built-in font, or the font itself."""
+    return _swedish.get(id(font), font)
+
+
+def _write_if_changed(path, data):
+    try:
+        with open(path, "rb") as file:
+            if file.read() == data:
+                return
+    except OSError:
+        pass  # not written yet
+    with open(path, "wb") as file:
+        file.write(data)
+
+
+def _inflate(data):
+    try:
+        import deflate
+        import io
+    except ImportError:  # PC tests
+        import zlib
+        return zlib.decompress(data)
+    return deflate.DeflateIO(io.BytesIO(data), deflate.ZLIB).read()
+
+
+def load_swedish_fonts():
+    """Use the Swedish fonts (True), or on any problem the built-in ones."""
+    global REPLACE_SWEDISH_CHARS, _fs_driver
+    try:
+        import binascii
+        import fs_driver
+
+        driver = lv.fs_drv_t()
+        fs_driver.fs_register(driver, "S")
+        loaded = {}
+        for name, data, builtin in (("sv20.bin", _SV20, FONT_BIG), ("sv14.bin", _SV14, FONT_SMALL)):
+            path = FONT_DIR + name
+            _write_if_changed(path, _inflate(binascii.a2b_base64("".join(data))))
+            font = lv.binfont_create("S:" + path)
+            if not font:
+                raise OSError("cannot load " + path)
+            font.fallback = builtin
+            loaded[id(builtin)] = font
+    except Exception as error:
+        print("Swedish fonts not used, a/o instead:", repr(error))
+        return False
+    _fs_driver = driver
+    _swedish.update(loaded)
+    REPLACE_SWEDISH_CHARS = False
+    return True
 
 
 def safe_text(text):
-    """Replace å, ä and ö if the font cannot draw them."""
+    """Text the fonts can draw: the letters of the small fonts stay when they
+    are loaded, else ASCII. Other characters are removed (printed once)."""
     text = str(text)
-    if REPLACE_SWEDISH_CHARS:
-        for char, plain in _CHAR_MAP.items():
-            if char in text:
-                text = text.replace(char, plain)
-    return text
+    if len(text) == len(text.encode()):
+        return text  # plain ASCII (1 byte a character), the usual case: fast
+    out = []
+    for char in text:
+        if char < "\x80" or "\uf000" <= char <= "\uf8ff" or (
+                char in _FONT_LETTERS and not REPLACE_SWEDISH_CHARS):
+            out.append(char)
+        elif char in _CHAR_MAP:
+            out.append(_CHAR_MAP[char])
+        elif char not in _reported:
+            _reported.add(char)
+            print("safe_text: no glyph for U+%04X, removed" % ord(char))
+    return "".join(out)
 
 
-# Shared styles use less memory than the same local style on every widget.
-# They must stay alive, so they are kept here.
+# Shared styles (less memory than local ones); kept alive here
 _styles = {}
 
 
@@ -97,12 +184,13 @@ def make_label(parent, text, width, font, color, wrap=False):
     if not wrap and LONG_CLIP is not None:
         label.set_long_mode(LONG_CLIP)
     label.set_text(safe_text(text))
+    font = ui_font(font)
     label.add_style(_style((id(font), color), _label_setup(font, color)), 0)
     return label
 
 
 def _set_text(label, text):
-    """Change the text only if it is new, so nothing is redrawn for nothing."""
+    """Change the text only if it is new (no redraw for nothing)."""
     if label.get_text() != text:
         label.set_text(text)
 
@@ -122,11 +210,8 @@ def make_button(parent, text, color, size, on_click=None, radius=None):
 
 
 def setup_page(tile, pad_row):
-    """Lay out a tile as a page: padding 8 and a column of widgets.
-
-    The tile itself holds the widgets, so there is no extra transparent
-    600x450 container on top of it to draw. It never scrolls itself.
-    """
+    """Lay out a tile as a page: padding 8, a column of widgets, no scrolling.
+    The tile holds the widgets: no extra transparent container to draw."""
     tile.set_style_pad_all(8, 0)
     tile.set_style_pad_row(pad_row, 0)
     tile.remove_flag(lv.obj.FLAG.SCROLLABLE)
@@ -135,7 +220,7 @@ def setup_page(tile, pad_row):
 
 
 def _make_row(parent, height):
-    """Create an invisible row that lays out its children from left to right."""
+    """An invisible row laying out its children from left to right."""
     row = lv.obj(parent)
     row.set_size(580, height)
     row.add_style(_style("row", _row_setup), 0)
@@ -183,8 +268,7 @@ def create_departure_screen(parent, on_refresh=None):
     """Build the screen in ``parent`` (a tile). Refresh calls ``on_refresh``."""
     setup_page(parent, 4)
 
-    # Title, page buttons, page label and Refresh. The title grows, so the
-    # rest ends up at the right edge whatever the gap is.
+    # Title (grows, so the rest is at the right edge), pages and Refresh
     title_row = _make_row(parent, 44)
     make_label(title_row, "Departures", 0, FONT_BIG, COLOR_TEXT).set_flex_grow(1)
     screen = {"departures": [], "page": 0}
@@ -211,11 +295,10 @@ def create_departure_screen(parent, on_refresh=None):
     list_box.remove_flag(lv.obj.FLAG.SCROLLABLE)
     list_box.remove_flag(lv.obj.FLAG.CLICKABLE)
 
-    # A row is 4 labels straight in the list, without a container and its
-    # flex layout. The header has the same row style, so its gap gives the
-    # same column positions.
+    # A row is 4 labels in the list, no container. The header has the row
+    # style, so its gap gives the column positions.
     xs = _column_x(_int_or(header.get_style_pad_column(0), 0))
-    line_height = _line_height(FONT_BIG)
+    line_height = _line_height(ui_font(FONT_BIG))  # the font actually used
     rows = []
     for index in range(MAX_ROWS):
         y = _label_y(index, line_height)
@@ -227,7 +310,7 @@ def create_departure_screen(parent, on_refresh=None):
         _set_row_hidden(item, True)
         rows.append(item)
 
-    # Shown instead of the rows: loading, no departures, errors
+    # Instead of the rows: loading, no departures, errors
     message = make_label(list_box, "", 0, FONT_BIG, COLOR_MUTED, wrap=True)
     message.set_width(lv.pct(100))
     message.add_flag(lv.obj.FLAG.HIDDEN)

@@ -8,7 +8,8 @@ from debug_log import log
 
 from screens.departure import (
     COLOR_MUTED, COLOR_TEXT, FONT_BIG, FONT_SMALL, MAX_DEPARTURES,
-    create_departure_screen, make_label, show_message, update_departures,
+    create_departure_screen, load_swedish_fonts, make_label, setup_page,
+    show_message, update_departures,
 )
 from screens.journey import (
     create_journey_screen, get_journey_selection, set_journey_stops,
@@ -22,52 +23,48 @@ from services import settings_manager, trafiklab
 from services.departure_worker import DepartureWorker, is_connected
 
 TOWN = "Karlskrona"  # US1.2B, US3.2B
-STOP_ID = None  # stop at start-up; None = the first fixed stop
-VERSION = "4"  # start screen (US1.1)
+STOP_ID = None  # start-up stop; None = the first fixed stop
+VERSION = "4"  # US1.1
 MEMBERS = ("Mustafa Ali Hussein Al-Soufi", "Berat Subasi", "Emanuel Gabro",
            "Ahmad Elhassen", "Ismail Alkhasara")
 REFRESH_MS = 60_000  # automatic refresh (US4.1)
-POLL_MS = 250  # how often the UI checks for a finished fetch
-FIRST_FETCH_MS = 1500  # the start screen is drawn before the first fetch
-# Redraw and read the touch on every LVGL run (LVGL's 33 ms skips frames)
-RENDER_PERIOD_MS = 10
-MAX_IDLE_MS = 10  # run_ui_loop: longest sleep between two LVGL runs
-TICK_CHECK_MS = 2000  # run_ui_loop: then check LVGL time is not counted twice
-
-# log() writes to the flash, which stalls the screen: only for rare events.
+POLL_MS = 250  # the UI checks for a finished fetch
+FIRST_FETCH_MS = 1500  # draw the start screen first
+RENDER_PERIOD_MS = 10  # redraw and read the touch on every LVGL run
+MAX_IDLE_MS = 10  # run_ui_loop: longest sleep
+TICK_CHECK_MS = 2000  # then check that time is not counted twice
+# log() writes the flash (stalls the screen): rare events only
 
 
 class Application:
     def __init__(self):
         self.display, self.touch, self.handler = start_board()
+        load_swedish_fonts()  # å ä ö, or a/o if that does not work
         saved = settings_manager.load()  # US3.4
-        # Enough departures for all pages of the departure board
+        # Departures for all pages
         self.worker = DepartureWorker(TOWN, saved["stop_id"] or STOP_ID, MAX_DEPARTURES)
         if saved["stop_id"]:
             self.worker.stop_name = saved["stop_name"]
         self.worker.set_transport(saved["transport"])
         self.stops = []  # dicts with 'id' and 'name'
-        self.selected_stop = None
-        self.refresh_pending = False  # poll_worker must start a fetch
-        self.journey_from = self.journey_to = None  # US5.2
-        self.journey_pending = False  # poll_worker must start a journey search
-        self.last_error = None  # the same error is only logged once
+        self.selected_stop = self.journey_from = self.journey_to = None
+        # Set: poll_worker starts a fetch / journey search (US5.2)
+        self.refresh_pending = self.journey_pending = False
+        self.last_error = None  # an error is only logged once
 
         self.create_ui()
         self.apply_stops(trafiklab.get_stops())  # fixed stops, no search
-        # Timers are kept on self so they are not garbage collected
+        # Kept on self so they are not garbage collected
         self.poll_timer = lv.timer_create(self.poll_worker, POLL_MS, None)
+        # US4.1
         self.refresh_timer = lv.timer_create(self.request_refresh, REFRESH_MS, None)
         self.first_timer = lv.timer_create(self.request_refresh, FIRST_FETCH_MS, None)
         self.first_timer.set_repeat_count(1)
         log("student application ready")
 
     def create_start_screen(self, tile):
-        "Function: Name, version, group and members (US1.1)"
-        tile.remove_flag(lv.obj.FLAG.SCROLLABLE)
-        tile.set_scrollbar_mode(lv.SCROLLBAR_MODE.OFF)
-        tile.set_style_pad_row(12, 0)
-        tile.set_flex_flow(lv.FLEX_FLOW.COLUMN)
+        "Name, version, group and members (US1.1)"
+        setup_page(tile, 12)
         tile.set_flex_align(lv.FLEX_ALIGN.CENTER, lv.FLEX_ALIGN.CENTER, lv.FLEX_ALIGN.CENTER)
         make_label(tile, "Karlskrona Transit", 0, FONT_BIG, COLOR_TEXT)
         make_label(tile, "Version " + VERSION + " | Group 7", 0, FONT_SMALL, COLOR_MUTED)
@@ -81,11 +78,11 @@ class Application:
         make_label(tile, "Swipe left for departures >", 0, FONT_SMALL, COLOR_MUTED)
 
     def create_ui(self):
-        "Function: The four screens in a tileview"
+        "The four screens in a tileview"
         tiles = self.tileview = lv.tileview(lv.screen_active())
         tiles.set_size(600, 450)
         tiles.set_scrollbar_mode(lv.SCROLLBAR_MODE.OFF)
-        # Only the tileview paints the background; the tiles are transparent
+        # Only the tileview paints a background
         tiles.set_style_bg_opa(lv.OPA.COVER, 0)
         tiles.set_style_bg_color(lv.color_hex(0x000000), 0)
         both = lv.DIR.LEFT | lv.DIR.RIGHT
@@ -100,7 +97,7 @@ class Application:
         self.journey_screen = create_journey_screen(  # US5.1, US5.2
             tiles.add_tile(3, 0, lv.DIR.LEFT), self.on_search_clicked)
 
-        # The fetch pauses during swipes and scrolling in the journey results
+        # The fetch waits during swipes and journey scrolling
         for widget in (tiles, self.journey_screen["results"]):
             widget.add_event_cb(self.on_scroll, lv.EVENT.SCROLL_BEGIN, None)
             widget.add_event_cb(self.on_scroll, lv.EVENT.SCROLL_END, None)
@@ -111,37 +108,41 @@ class Application:
             print("render tuning skipped:", error)
 
     def on_scroll(self, event):
-        "Function: A swipe or scroll starts or ends: the fetch waits meanwhile"
+        "The fetch waits while the user swipes or scrolls"
         trafiklab.set_scrolling(event.get_code() == lv.EVENT.SCROLL_BEGIN)
 
-    def request_refresh(self, timer=None):
-        "Function: Starts a background fetch of the departures (US4.1)"
-        self.worker.start()  # skipped if a fetch is still running
+    def request_refresh(self, _timer=None):
+        self.worker.start()
 
     def reload(self, _event=None):
-        "Function: Refresh (US4.2) or a new selection: Loading..., then a new fetch"
+        "Loading..., then a new fetch (US4.2)"
         show_message(self.departure_list, "Loading...")
         self.refresh_pending = True
 
+    def select_stop(self, index):
+        self.selected_stop = stop = self.stops[index]
+        self.worker.set_stop(stop["id"], stop["name"])
+
     def on_stop_changed(self, _event):
-        "Function: Another stop picked"
+        "Another stop picked"
         index = self.settings_screen["stop_dropdown"].get_selected()
         if index < len(self.stops):
-            self.selected_stop = self.stops[index]
-            self.worker.set_stop(self.selected_stop["id"], self.selected_stop["name"])
-            show_save_message(self.settings_screen, "")
-            self.reload()
+            self.select_stop(index)
+            self.changed()
 
     def on_transport_changed(self, _event):
-        "Function: Another transport type picked (US3.3)"
+        "Another transport type picked (US3.3)"
         index = self.settings_screen["transport_dropdown"].get_selected()
         if index < len(TRANSPORT_TYPES):
             self.worker.set_transport(TRANSPORT_TYPES[index])
-            show_save_message(self.settings_screen, "")
-            self.reload()
+            self.changed()
+
+    def changed(self):
+        show_save_message(self.settings_screen, "")
+        self.reload()
 
     def on_save_clicked(self, _event):
-        "Function: Saves the stop and transport type as default (US3.4)"
+        "Saves the stop and transport type as default (US3.4)"
         if self.selected_stop is None:
             show_save_message(self.settings_screen, "No stop to save yet", False)
             return
@@ -152,27 +153,26 @@ class Application:
         log("settings saved" if ok else "settings save failed")
 
     def on_reset_clicked(self, _event):
-        "Function: Restores the saved defaults (US3.5)"
+        "Restores the saved defaults (US3.5)"
         saved = settings_manager.load()
         self.worker.set_transport(saved["transport"])
         set_transport(self.settings_screen, saved["transport"])
         if self.stops:  # the saved stop, else STOP_ID, else the first
             index = self.stop_index(saved["stop_id"] or STOP_ID)
-            self.selected_stop = self.stops[index]
-            self.worker.set_stop(self.selected_stop["id"], self.selected_stop["name"])
+            self.select_stop(index)
             set_selected_stop(self.settings_screen, index)
         show_save_message(self.settings_screen, "Reset to default")
         self.reload()
 
     def stop_index(self, stop_id):
-        "Function: Position of ``stop_id`` in the stop list, 0 if it is not there"
+        "Position of ``stop_id`` in the stops, else 0"
         for index, stop in enumerate(self.stops):
             if stop["id"] == stop_id:
                 return index
         return 0
 
     def apply_stops(self, stops):
-        "Function: Fills the stop dropdowns and selects the worker's stop"
+        "Fills the stop dropdowns"
         self.stops = stops
         selected = self.stop_index(self.worker.stop_id)
         self.selected_stop = stops[selected]
@@ -181,7 +181,7 @@ class Application:
         set_journey_stops(self.journey_screen, names)
 
     def on_search_clicked(self, _event):
-        "Function: Search pressed on the journey screen (US5.2)"
+        "Search pressed on the journey screen (US5.2)"
         screen = self.journey_screen
         if not self.stops:
             show_journey_message(screen, "Stops are still loading", False)
@@ -196,32 +196,32 @@ class Application:
         self.journey_to = self.stops[to_index]
         show_journey_message(screen, self.journey_from["name"] + " -> " + self.journey_to["name"])
         show_trips(screen, None, "Searching...")
-        self.journey_pending = True  # poll_worker starts the search (US5.3)
+        self.journey_pending = True  # US5.3
 
     def poll_worker(self, timer=None):
-        "Function: Runs check_worker; an error is shown, it never stops the display"
+        "An error is shown, it never stops the display"
         try:
             self.check_worker()
         except Exception as error:
             text = "Error: %r" % (error,)
             sys.print_exception(error)
-            if text != self.last_error:  # do not fill the flash with one error
+            if text != self.last_error:
                 self.last_error = text
                 log("poll " + text)
                 show_message(self.departure_list, text)
 
     def check_worker(self):
-        "Function: Updates the screens when a background fetch has finished"
+        "Shows finished fetches"
         if trafiklab.is_scrolling():
-            return  # after the swipe, so nothing new is drawn during it
+            return  # nothing new is drawn during a swipe
         journey = self.worker.take_journey()  # US5.3
         if journey is not None:
             show_trips(self.journey_screen, journey[0], "Could not fetch journeys\n" + journey[1])
-        if self.refresh_pending:  # drop the old result and fetch again
+        if self.refresh_pending:  # drop the old result, fetch again
             self.worker.take_result()
             self.refresh_pending = not self.worker.start()
             return
-        if self.journey_pending:  # start the search when the worker is free
+        if self.journey_pending:
             self.journey_pending = not self.worker.start(
                 (self.journey_from["id"], self.journey_to["id"]))
             return
@@ -233,22 +233,16 @@ class Application:
 
 
 def show_fatal(error):
-    "Function: Shows a start-up error instead of a black screen"
+    "Shows a start-up error instead of a black screen"
     try:
-        label = lv.label(lv.screen_active())
-        label.set_width(560)
-        label.set_text("Start-up error:\n%r\nSee debug.log" % (error,))
-        label.set_style_text_color(lv.color_hex(0xF44336), 0)
-        label.center()
+        text = "Start-up error:\n%r\nSee debug.log" % (error,)
+        make_label(lv.screen_active(), text, 560, FONT_BIG, 0xF44336, wrap=True).center()
     except Exception:
         pass  # the display did not start
 
 
 def run_ui_loop(handler):
-    """Function: Runs LVGL as soon as it has work, not from the 33 ms TaskHandler.
-
-    Gives the work back to the TaskHandler if something is not as expected.
-    """
+    "Runs LVGL when it has work, not every 33 ms; else the TaskHandler"
     if sys.implementation.name != "micropython":
         return  # PC tests have no real LVGL
     try:
@@ -264,20 +258,20 @@ def run_ui_loop(handler):
             now = time.ticks_ms()
             lv.tick_inc(time.ticks_diff(now, last))
             last = now
+            wait = MAX_IDLE_MS
             try:
                 wait = lv.task_handler()  # ms until LVGL has work again
             except Exception as error:
                 sys.print_exception(error)
-                wait = MAX_IDLE_MS
             if not isinstance(wait, int):
                 wait = MAX_IDLE_MS
-            # If the TaskHandler counts time too, animations run twice as fast
+            # Is the time counted twice (animations twice as fast)?
             if not checked and time.ticks_diff(now, started) >= TICK_CHECK_MS:
                 checked = True
                 if lv.tick_elaps(started_tick) > time.ticks_diff(now, started) * 3 // 2:
                     print("UI loop stopped: LVGL time is already counted")
                     return
-            time.sleep_ms(max(1, min(wait, MAX_IDLE_MS)))  # lets the fetch run too
+            time.sleep_ms(max(1, min(wait, MAX_IDLE_MS)))  # the fetch runs too
     finally:
         handler.enable()  # for example after Ctrl+C
 

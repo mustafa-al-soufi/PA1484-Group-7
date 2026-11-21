@@ -4,7 +4,7 @@ import lvgl as lv
 
 from screens.departure import (
     COLOR_BG, COLOR_CANCELED, COLOR_MUTED, COLOR_OK, COLOR_TEXT, FONT_BIG,
-    FONT_SMALL, make_button, make_label, safe_text, setup_page,
+    FONT_SMALL, make_button, make_label, safe_text, setup_page, ui_font,
 )
 
 COLOR_CARD = 0x1B2A41
@@ -40,7 +40,7 @@ def _make_dropdown(parent, options, selected, on_changed):
     dropdown.set_width(lv.pct(100))
     dropdown.set_options(options)
     dropdown.set_selected(selected)
-    dropdown.set_style_text_font(FONT_BIG, 0)
+    dropdown.set_style_text_font(ui_font(FONT_BIG), 0)
     dropdown.set_style_text_color(lv.color_hex(COLOR_TEXT), 0)
     dropdown.set_style_bg_color(lv.color_hex(COLOR_BG), 0)
     dropdown.set_style_border_color(lv.color_hex(COLOR_MUTED), 0)
@@ -48,7 +48,7 @@ def _make_dropdown(parent, options, selected, on_changed):
         option_list = dropdown.get_list()
         option_list.set_style_bg_color(lv.color_hex(COLOR_BG), 0)
         option_list.set_style_text_color(lv.color_hex(COLOR_TEXT), 0)
-        option_list.set_style_text_font(FONT_BIG, 0)
+        option_list.set_style_text_font(ui_font(FONT_BIG), 0)
         option_list.set_style_border_color(lv.color_hex(COLOR_MUTED), 0)
         option_list.set_style_max_height(DROPDOWN_LIST_HEIGHT, 0)
     except Exception as error:

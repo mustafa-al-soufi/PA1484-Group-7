@@ -860,6 +860,238 @@ class TestWifi(unittest.TestCase):
             departure_worker.connect = real_connect
 
 
+class TestSafeText(unittest.TestCase):
+    """Only characters the fonts can draw reach the screen."""
+
+    def setUp(self):
+        self.saved = departure_screen.REPLACE_SWEDISH_CHARS
+        departure_screen.REPLACE_SWEDISH_CHARS = True  # built-in fonts only
+        departure_screen._reported.clear()
+
+    def tearDown(self):
+        departure_screen.REPLACE_SWEDISH_CHARS = self.saved
+        departure_screen._reported.clear()
+
+    def safe(self, text):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            result = departure_screen.safe_text(text)
+        self.printed = out.getvalue()
+        return result
+
+    def test_ascii_is_unchanged(self):
+        text = "Karlskrona C 12:05 -> Lyckeby"
+        self.assertIs(self.safe(text), text)  # the fast path: no copy
+        self.assertEqual(self.safe(""), "")
+        self.assertEqual(self.safe(42), "42")
+
+    def test_danish_and_other_letters(self):
+        self.assertEqual(self.safe("Østerport"), "Osterport")
+        self.assertEqual(self.safe("ø Æble æble"), "o AEble aeble")
+        self.assertEqual(self.safe("é è ë ü"), "e e e u")
+
+    def test_punctuation(self):
+        self.assertEqual(self.safe("Malmo – Lund — Ystad"), "Malmo - Lund - Ystad")
+        self.assertEqual(self.safe("‘a’ “b”"), "'a' \"b\"")
+        self.assertEqual(self.safe("12 min"), "12 min")
+
+    def test_swedish_letters_without_the_swedish_font(self):
+        self.assertEqual(self.safe("Gräsvik Åby Örebro"), "Grasvik Aby Orebro")
+
+    def test_swedish_letters_kept_with_the_swedish_font(self):
+        departure_screen.REPLACE_SWEDISH_CHARS = False
+        self.assertEqual(self.safe("ÅÄÖåäö"), "ÅÄÖåäö")
+        # The Swedish font only has å ä ö: the dash still becomes ASCII
+        self.assertEqual(self.safe("Malmö – Lund"), "Malmö - Lund")
+
+    def test_danish_letters_kept_with_the_small_fonts(self):
+        departure_screen.REPLACE_SWEDISH_CHARS = False
+        self.assertEqual(self.safe("Østerport"), "Østerport")
+        self.assertEqual(self.safe("ø Æble æble"), "ø Æble æble")
+        # The dash is not in the small fonts: still ASCII
+        self.assertEqual(self.safe("Malmö – Østerport"), "Malmö - Østerport")
+
+    def test_font_letters_are_the_ten_in_the_fonts(self):
+        self.assertEqual(sorted(departure_screen._FONT_LETTERS), sorted("åäöÅÄÖØøÆæ"))
+
+    def test_danish_letters_become_ascii_without_the_swedish_font(self):
+        self.assertEqual(self.safe("Østerport"), "Osterport")
+        self.assertEqual(self.safe("Æ æ"), "AE ae")
+
+    def test_unknown_character_is_removed_and_printed_once(self):
+        self.assertEqual(self.safe("10€"), "10")
+        self.assertIn("U+20AC", self.printed)
+        self.assertEqual(self.safe("5€"), "5")
+        self.assertEqual(self.printed, "")  # not printed again
+
+    def test_lvgl_symbols_are_kept(self):
+        up = ""  # lv.SYMBOL.UP, in the built-in fonts
+        self.assertEqual(self.safe(up + " Ø"), up + " O")
+
+    def test_departure_row_shows_the_replacement(self):
+        screen = departure_screen.create_departure_screen(FakeObj())
+        departure_screen.update_departures(
+            screen, [{"time": "12:05", "destination": "Østerport", "status": "On time"}])
+        self.assertEqual(screen["rows"][0]["dest"].text, "Osterport")
+
+
+class FakeFont:
+    """What lv.binfont_create returns: a font with a fallback field."""
+
+    fallback = None
+
+
+class TestSwedishFonts(unittest.TestCase):
+    """å ä ö with small fonts on top of the built-in ones, else a/o."""
+
+    def setUp(self):
+        d = departure_screen
+        self.saved = (d.REPLACE_SWEDISH_CHARS, dict(d._swedish), d._fs_driver, d.FONT_DIR)
+        self.folder = tempfile.TemporaryDirectory()
+        d.FONT_DIR = self.folder.name + os.sep
+        self.paths = []
+        self.registered = []
+
+        def binfont_create(path):
+            self.paths.append(path)
+            return FakeFont()
+
+        fake_lv.binfont_create = binfont_create
+        fake_fs = types.ModuleType("fs_driver")
+        fake_fs.fs_register = lambda driver, letter: self.registered.append(letter)
+        sys.modules["fs_driver"] = fake_fs
+
+    def tearDown(self):
+        d = departure_screen
+        d.REPLACE_SWEDISH_CHARS, swedish, d._fs_driver, d.FONT_DIR = self.saved
+        d._swedish.clear()
+        d._swedish.update(swedish)
+        del fake_lv.binfont_create
+        sys.modules.pop("fs_driver", None)
+        self.folder.cleanup()
+
+    def load(self):
+        """Run load_swedish_fonts and return (result, printed text)."""
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            result = departure_screen.load_swedish_fonts()
+        return result, out.getvalue()
+
+    def font_file(self, name):
+        with open(os.path.join(self.folder.name, name), "rb") as file:
+            return file.read()
+
+    def test_fonts_used_when_everything_works(self):
+        d = departure_screen
+        ok, text = self.load()
+        self.assertTrue(ok)
+        self.assertEqual(text, "")
+        self.assertEqual(self.registered, ["S"])
+        self.assertEqual(self.paths, ["S:" + d.FONT_DIR + "sv20.bin", "S:" + d.FONT_DIR + "sv14.bin"])
+        big, small = d.ui_font(d.FONT_BIG), d.ui_font(d.FONT_SMALL)
+        self.assertIsInstance(big, FakeFont)
+        self.assertIs(big.fallback, d.FONT_BIG)  # every other letter: built-in
+        self.assertIs(small.fallback, d.FONT_SMALL)
+
+    def test_no_replacement_with_the_swedish_fonts(self):
+        self.load()
+        self.assertEqual(departure_screen.safe_text("Gräsvik Åby Örebro"), "Gräsvik Åby Örebro")
+
+    @staticmethod
+    def font_bytes(data):
+        """The binfont in _SV20 / _SV14 (zlib + base64)."""
+        import binascii
+        import zlib
+
+        return zlib.decompress(binascii.a2b_base64("".join(data)))
+
+    def test_font_files_are_written(self):
+        self.load()
+        d = departure_screen
+        self.assertEqual(self.font_file("sv20.bin"), self.font_bytes(d._SV20))
+        self.assertEqual(self.font_file("sv14.bin"), self.font_bytes(d._SV14))
+
+    def test_fonts_have_room_for_a_ring(self):
+        import struct
+
+        # LVGL: line_height = ascent - descent, base_line = -descent
+        for data, line_height, base_line in ((departure_screen._SV20, 24, 4),
+                                             (departure_screen._SV14, 18, 3)):
+            raw = self.font_bytes(data)
+            self.assertEqual(raw[4:8], b"head")
+            ascent, descent = struct.unpack_from("<Hh", raw, 16)
+            self.assertEqual((ascent - descent, -descent), (line_height, base_line))
+
+    def test_fonts_have_the_ten_letters(self):
+        import struct
+
+        for data, size in ((departure_screen._SV20, 20), (departure_screen._SV14, 14)):
+            raw = self.font_bytes(data)
+            self.assertEqual(struct.unpack_from("<H", raw, 14)[0], size)  # font size
+            self.assertEqual(raw[37], 4)  # bits per pixel, as the built-in fonts
+            # Walk the tables; loca has one entry per glyph plus LVGL's glyph 0
+            offset, tables = 0, {}
+            while offset < len(raw):
+                length, tag = struct.unpack_from("<I4s", raw, offset)
+                tables[tag] = offset
+                offset += length
+            self.assertEqual(set(tables), {b"head", b"cmap", b"loca", b"glyf"})
+            self.assertEqual(struct.unpack_from("<I", raw, tables[b"loca"] + 8)[0], 11)
+
+    def test_correct_file_is_not_written_again(self):
+        self.load()
+        path = os.path.join(self.folder.name, "sv20.bin")
+        old = 1_000_000_000_000_000_000  # a round time every file system can store
+        os.utime(path, ns=(old, old))
+        self.load()
+        self.assertEqual(os.stat(path).st_mtime_ns, old)
+
+    def test_damaged_file_is_written_again(self):
+        self.load()
+        path = os.path.join(self.folder.name, "sv20.bin")
+        with open(path, "wb") as file:
+            file.write(b"broken")
+        self.load()
+        self.assertNotEqual(self.font_file("sv20.bin"), b"broken")
+
+    def assert_fallback(self, ok, text):
+        d = departure_screen
+        self.assertFalse(ok)
+        self.assertTrue(d.REPLACE_SWEDISH_CHARS)
+        self.assertEqual(d.safe_text("Gräsvik Åby Örebro"), "Grasvik Aby Orebro")
+        self.assertIs(d.ui_font(d.FONT_BIG), d.FONT_BIG)
+        self.assertIs(d.ui_font(d.FONT_SMALL), d.FONT_SMALL)
+        # The reason is printed once
+        self.assertEqual(len(text.strip().splitlines()), 1)
+        self.assertIn("Swedish fonts not used", text)
+
+    def test_no_fs_driver(self):
+        sys.modules["fs_driver"] = None  # import fs_driver fails
+        self.assert_fallback(*self.load())
+
+    def test_no_binfont_create(self):
+        def missing(path):
+            raise AttributeError("binfont_create")
+
+        fake_lv.binfont_create = missing
+        self.assert_fallback(*self.load())
+
+    def test_second_font_fails_so_none_is_used(self):
+        fake_lv.binfont_create = lambda path: FakeFont() if "sv20" in path else None
+        self.assert_fallback(*self.load())
+
+    def test_flash_write_fails(self):
+        departure_screen.FONT_DIR = os.path.join(self.folder.name, "missing", "")
+        self.assert_fallback(*self.load())
+
+    def test_make_label_uses_the_swedish_font(self):
+        d = departure_screen
+        self.load()
+        label = d.make_label(FakeObj(), "Åby", 0, d.FONT_BIG, d.COLOR_TEXT)
+        self.assertEqual(label.text, "Åby")
+        self.assertIn((id(d.ui_font(d.FONT_BIG)), d.COLOR_TEXT), d._styles)
+
+
 class TestJsonStream(unittest.TestCase):
     def test_reads_objects_from_array(self):
         body = json.dumps(

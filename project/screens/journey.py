@@ -4,7 +4,7 @@ import lvgl as lv
 
 from screens.departure import (
     ATTRIBUTION, COLOR_CANCELED, COLOR_MUTED, COLOR_OK, COLOR_TEXT, FONT_BIG,
-    FONT_SMALL, _make_row, make_button, make_label, safe_text, setup_page,
+    FONT_SMALL, _make_row, make_button, make_label, safe_text, setup_page, ui_font,
 )
 from screens.settings import _make_dropdown, _make_section
 
@@ -20,7 +20,7 @@ def _stop_dropdown(row, title):
     card = _make_section(row, title, 82)
     card.set_width(270)
     dropdown = _make_dropdown(card, "Loading...", 0, _ignore)
-    dropdown.set_style_text_font(FONT_SMALL, 0)
+    dropdown.set_style_text_font(ui_font(FONT_SMALL), 0)
     return dropdown
 
 
