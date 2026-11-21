@@ -19,7 +19,8 @@ from screens.settings import (
     TRANSPORT_TYPES, create_settings_screen, set_selected_stop, set_stops,
     set_transport, show_save_message, update_connection_status,
 )
-from services import settings_manager, trafiklab
+from screens import settings as settings_manager  # saved defaults (US3.4)
+from services import trafiklab
 from services.departure_worker import DepartureWorker, is_connected
 
 TOWN = "Karlskrona"  # US1.2B, US3.2B
@@ -50,6 +51,7 @@ class Application:
         self.selected_stop = self.journey_from = self.journey_to = None
         # Set: poll_worker starts a fetch / journey search (US5.2)
         self.refresh_pending = self.journey_pending = False
+        self.search_pending = None  # text of a stop search to start (US3.2C)
         self.last_error = None  # an error is only logged once
 
         self.create_ui()
@@ -93,7 +95,7 @@ class Application:
         self.settings_screen = create_settings_screen(  # US3.1
             tiles.add_tile(2, 0, both), "Loading...", self.on_stop_changed,
             self.on_transport_changed, self.on_save_clicked, self.on_reset_clicked,
-            self.worker.transport)
+            self.worker.transport, self.on_stop_search)
         self.journey_screen = create_journey_screen(  # US5.1, US5.2
             tiles.add_tile(3, 0, lv.DIR.LEFT), self.on_search_clicked)
 
@@ -157,28 +159,54 @@ class Application:
         saved = settings_manager.load()
         self.worker.set_transport(saved["transport"])
         set_transport(self.settings_screen, saved["transport"])
-        if self.stops:  # the saved stop, else STOP_ID, else the first
-            index = self.stop_index(saved["stop_id"] or STOP_ID)
-            self.select_stop(index)
-            set_selected_stop(self.settings_screen, index)
+        if saved["stop_id"]:  # may be a searched stop, not in the list
+            self.worker.set_stop(saved["stop_id"], saved["stop_name"])
+            self.apply_stops(self.stops)
+        elif self.stops:  # else the first
+            self.select_stop(0)
+            set_selected_stop(self.settings_screen, 0)
         show_save_message(self.settings_screen, "Reset to default")
         self.reload()
 
     def stop_index(self, stop_id):
-        "Position of ``stop_id`` in the stops, else 0"
+        "Position of ``stop_id`` in the stops, else -1"
         for index, stop in enumerate(self.stops):
             if stop["id"] == stop_id:
                 return index
-        return 0
+        return -1
 
     def apply_stops(self, stops):
-        "Fills the stop dropdowns"
+        "Fills the stop dropdowns; the current stop stays in them, on top"
         self.stops = stops
         selected = self.stop_index(self.worker.stop_id)
+        if selected < 0:
+            stops.insert(0, {"id": self.worker.stop_id, "name": self.worker.stop_name or "Selected stop"})
+            selected = 0
         self.selected_stop = stops[selected]
         names = [stop["name"] for stop in stops]
         set_stops(self.settings_screen, names, selected)
         set_journey_stops(self.journey_screen, names)
+
+    def on_stop_search(self, text):
+        "Stop search (US3.2C); an empty search brings back the fixed stops"
+        text = text.strip()
+        if text:
+            self.search_pending = text  # poll_worker starts it
+            show_save_message(self.settings_screen, "Searching...")
+        else:
+            self.apply_stops(trafiklab.get_stops())
+            show_save_message(self.settings_screen, "")
+
+    def show_found_stops(self, stops):
+        "The stop search finished: the stops go into the dropdown, opened"
+        screen = self.settings_screen
+        if not stops:
+            show_save_message(screen, "Search failed" if stops is None else "No stops found", False)
+            return
+        count = len(stops)
+        self.apply_stops(stops)
+        show_save_message(screen, "%d stops found" % count)
+        screen["stop_dropdown"].open()
 
     def on_search_clicked(self, _event):
         "Search pressed on the journey screen (US5.2)"
@@ -217,6 +245,9 @@ class Application:
         journey = self.worker.take_journey()  # US5.3
         if journey is not None:
             show_trips(self.journey_screen, journey[0], "Could not fetch journeys\n" + journey[1])
+        found = self.worker.take_stops()  # US3.2C
+        if found is not None:
+            self.show_found_stops(found[0])
         if self.refresh_pending:  # drop the old result, fetch again
             self.worker.take_result()
             self.refresh_pending = not self.worker.start()
@@ -224,6 +255,10 @@ class Application:
         if self.journey_pending:
             self.journey_pending = not self.worker.start(
                 (self.journey_from["id"], self.journey_to["id"]))
+            return
+        if self.search_pending:
+            if self.worker.start(search=self.search_pending):
+                self.search_pending = None
             return
         result = self.worker.take_result()
         if result is not None:

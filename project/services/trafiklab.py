@@ -1,8 +1,5 @@
-"""Trafiklab Realtime API (departures) and ResRobot (journeys, US5.3).
-
-Answers are read in chunks, one JSON object at a time, to save memory.
-Everything blocks: only call it from the background worker.
-"""
+"""Trafiklab Realtime API (departures, stops) and ResRobot (journeys, US5.3).
+Read in chunks, one JSON object at a time. Blocks: background worker only."""
 
 import json
 import time
@@ -13,23 +10,22 @@ from secrets import RESROBOT_API_KEY, TRAFIKLAB_API_KEY
 
 BASE_URL = "https://realtime-api.trafiklab.se/v1/"
 TRIP_URL = "https://api.resrobot.se/v2.1/trip?format=json&passlist=0&numF="
-CHUNK_SIZE = 2048  # bytes read at a time
+CHUNK_SIZE = 2048
 
-# MicroPython only (None in the PC tests)
+# None in the PC tests
 _sleep_ms = getattr(time, "sleep_ms", None)
 _ticks_ms = getattr(time, "ticks_ms", None)
 
-# While the user scrolls, and CALM_MS after, the fetch waits for the UI
-# (at most MAX_PAUSE_MS at a time).
+# The fetch waits while the user scrolls and CALM_MS after (MAX_PAUSE_MS at most)
 CALM_MS = 500
 MAX_PAUSE_MS = 3000
 _scrolling = False
-_scroll_end = 0  # ticks_ms when the last scroll ended
+_scroll_end = 0  # ticks_ms
 
-EXTRA_DEPARTURES = 5  # sorted by time, but a delay can move one: read a few more
-DELAY_THRESHOLD_S = 60  # "Delayed" from this many seconds late
+EXTRA_DEPARTURES = 5  # sorted by time, a delay can move one: read a few more
+DELAY_THRESHOLD_S = 60  # seconds late = "Delayed"
 
-TRANSPORT_ALL = "All"  # no filter
+TRANSPORT_ALL = "All"
 # App names -> API names. The API calls ferries BOAT.
 TRANSPORT_API_NAMES = {"Bus": "BUS", "Train": "TRAIN", "Ferry": "BOAT"}
 
@@ -39,8 +35,7 @@ AREA_LAT_MAX = 56.35
 AREA_LON_MIN = 15.45
 AREA_LON_MAX = 16.05
 
-# Selectable stops in dropdown order (the first is the default). Fixed ids
-# from the Realtime API (busiest matching area): no searches at start-up.
+# Fixed stops in dropdown order, the first is the default (ids from the API)
 STOPS = (
     {"id": "740000230", "name": "Karlskrona Centralstation"},  # train, bus
     {"id": "740032188", "name": "Campus Gräsvik"},  # bus, BTH campus
@@ -98,8 +93,29 @@ def get_stops():
     return [dict(stop) for stop in STOPS]
 
 
+def useful_stops(groups, limit=10):
+    """US3.2C: in the Karlskrona area, no META_STOP, with traffic, one per name;
+    busiest first, at most ``limit``."""
+    best = {}
+    for group in groups:
+        name = group.get("name") or ""
+        traffic = group.get("average_daily_stop_times") or 0
+        if group.get("area_type") == "META_STOP" or traffic <= 0 or not _in_area(group):
+            continue
+        if name not in best or traffic > best[name]["traffic"]:
+            best[name] = {"id": str(group.get("id")), "name": name, "traffic": traffic}
+    stops = sorted(best.values(), key=lambda stop: -stop["traffic"])
+    return stops[:limit]
+
+
+def search_stops(text):
+    """Stops whose name matches ``text`` (US3.2C): a list, or None on error."""
+    return _fetch(_realtime("stops/name/" + _url_encode(text)),
+                  lambda raw: useful_stops(_iter_json_array(raw, b"stop_groups")))
+
+
 def set_scrolling(scrolling):
-    """Called by the UI when a scroll or swipe starts (True) and ends (False)."""
+    """The UI: a scroll or swipe starts (True) or ends (False)."""
     global _scrolling, _scroll_end
     _scrolling = scrolling
     if not scrolling and _ticks_ms is not None:
@@ -125,19 +141,30 @@ def yield_to_ui():
         waited += 20
 
 
-def _open(path):
-    """GET a Realtime API path; the body is not read yet."""
-    url = BASE_URL + path + "?key=" + TRAFIKLAB_API_KEY
-    yield_to_ui()  # do not start TLS during a scroll
+def _realtime(path):
+    return BASE_URL + path + "?key=" + TRAFIKLAB_API_KEY
+
+
+def _fetch(url, read):
+    """``read(body)`` of GET ``url``, None on error."""
+    response = None
     try:
-        response = urequests.get(url, timeout=10)
-    except TypeError:  # older urequests has no timeout
-        response = urequests.get(url)
-    if response.status_code != 200:
-        status = response.status_code
-        response.close()
-        raise Exception("HTTP " + str(status))
-    return response
+        yield_to_ui()  # do not start TLS during a scroll
+        try:
+            response = urequests.get(url, timeout=10)
+        except TypeError:  # older urequests has no timeout
+            response = urequests.get(url)
+        if response.status_code != 200:
+            raise Exception("HTTP " + str(response.status_code))
+        result = read(response.raw)
+        _clear_error()
+        return result
+    except Exception as error:
+        _set_error(_describe(error))
+        return None
+    finally:
+        if response is not None:
+            response.close()
 
 
 def _find(buffer, char, start, size):
@@ -165,8 +192,7 @@ def _iter_json_array(stream, key, needles=None):
             break
         buffer = buffer[-len(marker) :]
 
-    # find() runs in C: the loop only jumps between quotes, backslashes and
-    # braces. ``size`` = not in this chunk.
+    # find() runs in C: jump between quotes, backslashes, braces (size = none)
     in_array = in_string = escaped = False
     depth = 0  # open {
     pieces = []  # parts of an object from earlier chunks
@@ -267,30 +293,23 @@ def _sort_key(departure):
 
 def get_departures(stop_id, limit=15, transport=TRANSPORT_ALL):
     """The next ``limit`` departures of ``transport``: a list, or None on error."""
-    response = None
-    try:
-        response = _open("departures/" + str(stop_id))
-        # Skip other types before json.loads (checked again below)
-        needles = None
-        if transport != TRANSPORT_ALL:
-            mode = TRANSPORT_API_NAMES.get(transport, transport.upper()).encode()
-            needles = (b'"' + mode + b'"', b'"' + mode.lower() + b'"')
+    # Skip other types before json.loads (checked again below)
+    needles = None
+    if transport != TRANSPORT_ALL:
+        mode = TRANSPORT_API_NAMES.get(transport, transport.upper()).encode()
+        needles = (b'"' + mode + b'"', b'"' + mode.lower() + b'"')
+
+    def read(raw):
         kept = []
-        for item in _iter_json_array(response.raw, b"departures", needles):
+        for item in _iter_json_array(raw, b"departures", needles):
             if _matches_transport(item, transport):
                 kept.append(_to_departure(item))
                 if len(kept) >= limit + EXTRA_DEPARTURES:
                     break  # the rest are later
         kept.sort(key=_sort_key)
-        del kept[limit:]
-        _clear_error()
-        return kept
-    except Exception as error:
-        _set_error(_describe(error))
-        return None
-    finally:
-        if response is not None:
-            response.close()
+        return kept[:limit]
+
+    return _fetch(_realtime("departures/" + str(stop_id)), read)
 
 
 def _as_list(value):
@@ -341,26 +360,15 @@ def _to_trip(trip):
 
 def get_trips(origin_id, dest_id, limit=5):
     """The next journeys between two stops, or None if it failed."""
-    url = "%s%d&originId=%s&destId=%s&accessId=%s" % (
-        TRIP_URL, limit, origin_id, dest_id, RESROBOT_API_KEY)
-    response = None
-    try:
-        yield_to_ui()
-        response = urequests.get(url)
-        if response.status_code != 200:
-            raise Exception("HTTP " + str(response.status_code))
+    def read(raw):
         trips = []
-        for item in _iter_json_array(response.raw, b"Trip"):
+        for item in _iter_json_array(raw, b"Trip"):
             trip = _to_trip(item)
             if trip is not None:
                 trips.append(trip)
             if len(trips) >= limit:
                 break
-        _clear_error()
         return trips
-    except Exception as error:
-        _set_error(_describe(error))
-        return None
-    finally:
-        if response is not None:
-            response.close()
+
+    return _fetch("%s%d&originId=%s&destId=%s&accessId=%s" % (
+        TRIP_URL, limit, origin_id, dest_id, RESROBOT_API_KEY), read)
