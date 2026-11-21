@@ -1,89 +1,59 @@
-"""Trafiklab Realtime API (stops, departures) and ResRobot (journeys, US5.3).
+"""Trafiklab Realtime API (departures) and ResRobot (journeys, US5.3).
 
-The ESP32 has little memory, so the answers are read in small chunks and
-one JSON object at a time. All functions block, so only call them from the
-background worker.
+Answers are read in chunks, one JSON object at a time, to save memory.
+Everything blocks: only call it from the background worker.
 """
 
-import gc
 import json
+import time
 
 import urequests
 
 from secrets import RESROBOT_API_KEY, TRAFIKLAB_API_KEY
 
 BASE_URL = "https://realtime-api.trafiklab.se/v1/"
+TRIP_URL = "https://api.resrobot.se/v2.1/trip?format=json&passlist=0&numF="
+CHUNK_SIZE = 2048  # bytes read at a time
 
-# Bytes read from the connection at a time
-CHUNK_SIZE = 1024
+# MicroPython only (None in the PC tests)
+_sleep_ms = getattr(time, "sleep_ms", None)
+_ticks_ms = getattr(time, "ticks_ms", None)
 
-# A departure is "Delayed" when it is at least this many seconds late
-DELAY_THRESHOLD_S = 60
+# While the user scrolls, and CALM_MS after, the fetch waits for the UI
+# (at most MAX_PAUSE_MS at a time).
+CALM_MS = 500
+MAX_PAUSE_MS = 3000
+_scrolling = False
+_scroll_end = 0  # ticks_ms when the last scroll ended
 
-# "All" means no transport filter
-TRANSPORT_ALL = "All"
+EXTRA_DEPARTURES = 5  # sorted by time, but a delay can move one: read a few more
+DELAY_THRESHOLD_S = 60  # "Delayed" from this many seconds late
 
-# The names in the app and the names the API uses for them. The API writes
-# BOAT for ferries, so "Ferry" must be translated.
-TRANSPORT_API_NAMES = {
-    "Bus": "BUS",
-    "Train": "TRAIN",
-    "Ferry": "BOAT",
-}
+TRANSPORT_ALL = "All"  # no filter
+# App names -> API names. The API calls ferries BOAT.
+TRANSPORT_API_NAMES = {"Bus": "BUS", "Train": "TRAIN", "Ferry": "BOAT"}
 
-# A stop must have a child stop inside this box. This removes stops with
-# the same name in other towns.
+# Karlskrona area: a stop must have a child stop in this box (US3.2C)
 AREA_LAT_MIN = 56.05
 AREA_LAT_MAX = 56.35
 AREA_LON_MIN = 15.45
 AREA_LON_MAX = 16.05
 
-# The five stops that can be selected, in dropdown order. The first one is
-# shown at start-up when no default is saved.
-#   name:   the text shown in the app
-#   search: names sent to the API, tried in order until the stop is found
-#   match:  whole words that must be in the stop name, so "Karlskrona C"
-#           does not match "Karlskrona Campus Grasvik"
+# Selectable stops in dropdown order (the first is the default). Fixed ids
+# from the Realtime API (busiest matching area): no searches at start-up.
 STOPS = (
-    {
-        # Train and bus
-        "name": "Karlskrona Centralstation",
-        "search": ("Karlskrona",),
-        "match": ("karlskrona c", "karlskrona centralstation", "karlskrona station"),
-    },
-    {
-        # Bus, BTH campus
-        "name": "Campus Gräsvik",
-        "search": ("Gräsvik",),
-        "match": ("gräsvik",),
-    },
-    {
-        # Bus, the main bus hub in the city centre
-        "name": "Kungsplan",
-        "search": ("Kungsplan",),
-        "match": ("kungsplan",),
-    },
-    {
-        # Train and bus, the second train station in Karlskrona
-        "name": "Bergåsa station",
-        "search": ("Bergåsa",),
-        "match": ("bergåsa",),
-    },
-    {
-        # Ferry, the commuter boats to Sturkö and Trummenäs run all year
-        "name": "Handelshamnen",
-        "search": ("Handelshamnen",),
-        "match": ("handelshamnen",),
-    },
+    {"id": "740000230", "name": "Karlskrona Centralstation"},  # train, bus
+    {"id": "740032188", "name": "Campus Gräsvik"},  # bus, BTH campus
+    {"id": "740020510", "name": "Kungsplan"},  # main bus hub
+    {"id": "740001537", "name": "Bergåsa station"},  # train, bus
+    {"id": "740020699", "name": "Handelshamnen"},  # ferry
 )
 
-# Description of the last failure, "" if the last request worked
 _last_error = ""
 
 
 def get_last_error():
-    """Return a short text about the last failed request ('' if none)."""
-    return _last_error
+    return _last_error  # '' if the last request worked
 
 
 def _set_error(text):
@@ -103,31 +73,66 @@ def _describe(error):
 
 
 def _url_encode(text):
-    """Make text safe for a URL.
-
-    Letters like å, ä and ö are not allowed in a URL, so they are replaced
-    with %-codes that the server turns back into the right letters.
-    """
-    safe_chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_.~"
+    """Make text safe for a URL; å, ä, ö become %-codes (US3.2C)."""
+    safe = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_.~"
     encoded = ""
     for byte in text.encode("utf-8"):
         char = chr(byte)
-        encoded += char if char in safe_chars else "%{:02X}".format(byte)
+        encoded += char if char in safe else "%{:02X}".format(byte)
     return encoded
 
 
-def _open(path):
-    """Send a GET request and return the open response.
+def _in_area(group):
+    """True if a child stop of ``group`` is in the Karlskrona area (US3.2C)."""
+    for child in group.get("stops") or []:
+        lat, lon = child.get("lat"), child.get("lon")
+        if lat is None or lon is None:
+            continue
+        if AREA_LAT_MIN <= lat <= AREA_LAT_MAX and AREA_LON_MIN <= lon <= AREA_LON_MAX:
+            return True
+    return False
 
-    The body is not read yet. Raises an exception if the status is not 200.
-    """
+
+def get_stops():
+    """The selectable stops as a new list (the caller may change it)."""
+    return [dict(stop) for stop in STOPS]
+
+
+def set_scrolling(scrolling):
+    """Called by the UI when a scroll or swipe starts (True) and ends (False)."""
+    global _scrolling, _scroll_end
+    _scrolling = scrolling
+    if not scrolling and _ticks_ms is not None:
+        _scroll_end = _ticks_ms()
+
+
+def is_scrolling():
+    return _scrolling
+
+
+def _ui_is_busy():
+    return _scrolling or time.ticks_diff(_ticks_ms(), _scroll_end) < CALM_MS
+
+
+def yield_to_ui():
+    """Let the UI thread draw, and wait while the user scrolls."""
+    if _sleep_ms is None:
+        return  # PC tests
+    _sleep_ms(1)
+    waited = 0
+    while waited < MAX_PAUSE_MS and _ui_is_busy():
+        _sleep_ms(20)
+        waited += 20
+
+
+def _open(path):
+    """GET a Realtime API path; the body is not read yet."""
     url = BASE_URL + path + "?key=" + TRAFIKLAB_API_KEY
+    yield_to_ui()  # do not start TLS during a scroll
     try:
         response = urequests.get(url, timeout=10)
-    except TypeError:
-        # Older urequests has no timeout argument
+    except TypeError:  # older urequests has no timeout
         response = urequests.get(url)
-
     if response.status_code != 200:
         status = response.status_code
         response.close()
@@ -135,18 +140,19 @@ def _open(path):
     return response
 
 
-def _iter_json_array(stream, key):
-    """Yield the objects of a JSON array one at a time.
+def _find(buffer, char, start, size):
+    position = buffer.find(char, start)
+    return size if position < 0 else position
 
-    ``stream`` is anything with read(n), for example response.raw, and ``key``
-    is the name of the array as bytes, for example b"departures". Each object
-    is cut out by counting braces and then decoded with json.loads.
+
+def _iter_json_array(stream, key, needles=None):
+    """Yield the objects of the JSON array ``key`` (bytes) from ``stream``.
+
+    Objects are cut out by counting braces. With ``needles`` (bytes), objects
+    that contain none of them are skipped before json.loads.
     """
     marker = b'"' + key + b'"'
-    marker_len = len(marker)
-
-    # Step 1: read until the key is found. Keep the end of the buffer so a
-    # key that is split between two chunks is still found.
+    # Read until the key; keep the end of the buffer for a key split in two
     buffer = b""
     while True:
         chunk = stream.read(CHUNK_SIZE)
@@ -155,182 +161,78 @@ def _iter_json_array(stream, key):
         buffer += chunk
         key_pos = buffer.find(marker)
         if key_pos >= 0:
-            buffer = buffer[key_pos + marker_len :]
+            buffer = buffer[key_pos + len(marker) :]
             break
-        buffer = buffer[-marker_len:]
+        buffer = buffer[-len(marker) :]
 
-    # Step 2: go through the bytes and cut out each object
-    in_array = False
-    in_string = False
-    escaped = False
-    depth = 0  # how many { are open right now
-    partial = b""  # start of an object from an earlier chunk
-
+    # find() runs in C: the loop only jumps between quotes, backslashes and
+    # braces. ``size`` = not in this chunk.
+    in_array = in_string = escaped = False
+    depth = 0  # open {
+    pieces = []  # parts of an object from earlier chunks
     while True:
-        # An object that is still open continues at the start of this chunk
         start = 0 if depth > 0 else -1
-
-        for i in range(len(buffer)):
-            byte = buffer[i]
-
+        size = len(buffer)
+        i = 0
+        if escaped:  # the last chunk ended after a backslash
+            i, escaped = 1, False
+        quote = slash = opening = closing = -1
+        while i < size:
+            if quote < i:
+                quote = _find(buffer, b'"', i, size)
             if in_string:
-                # Inside a string only the closing quote matters
-                if escaped:
-                    escaped = False
-                elif byte == 92:  # backslash
-                    escaped = True
-                elif byte == 34:  # quote
-                    in_string = False
-            elif byte == 34:  # quote
+                if slash < i:
+                    slash = _find(buffer, b"\\", i, size)
+                if slash < quote:
+                    i = slash + 2  # skip the escaped character
+                    escaped = i > size
+                    continue
+                if quote == size:
+                    break  # the string goes on in the next chunk
+                in_string = False
+                i = quote + 1
+                continue
+            if depth > 0:  # in an object only quotes and braces matter
+                if opening < i:
+                    opening = _find(buffer, b"{", i, size)
+                if closing < i:
+                    closing = _find(buffer, b"}", i, size)
+                i = min(quote, opening, closing)
+                if i == size:
+                    break
+            byte = buffer[i]
+            if byte == 34:  # "
                 in_string = True
             elif byte == 123:  # {
                 if depth == 0:
                     if not in_array:
-                        return  # the value was not an array
+                        return  # the value is not an array
                     start = i
-                    partial = b""
                 depth += 1
             elif byte == 125:  # }
                 depth -= 1
                 if depth == 0:
-                    # The object is complete
-                    object_bytes = partial + buffer[start : i + 1]
-                    yield json.loads(str(object_bytes, "utf-8"))
+                    pieces.append(buffer[start : i + 1])
+                    object_bytes = b"".join(pieces)  # one copy only
+                    pieces = []
                     start = -1
-                    partial = b""
+                    if needles is None or any(n in object_bytes for n in needles):
+                        yield json.loads(object_bytes)
             elif depth == 0:
                 if byte == 91:  # [
                     in_array = True
                 elif byte == 93 and in_array:  # ] ends the array
                     return
-
-        # The chunk ended inside an object: save what we have so far
+            i += 1
         if depth > 0:
-            partial += buffer[start:]
-
+            pieces.append(buffer[start:])
+        yield_to_ui()
         buffer = stream.read(CHUNK_SIZE)
         if not buffer:
             return
 
 
-def _in_area(group):
-    """Return True if a child stop of ``group`` is inside Karlskrona."""
-    for child in group.get("stops") or []:
-        lat = child.get("lat")
-        lon = child.get("lon")
-        if lat is None or lon is None:
-            continue
-        if AREA_LAT_MIN <= lat <= AREA_LAT_MAX and AREA_LON_MIN <= lon <= AREA_LON_MAX:
-            return True
-    return False
-
-
-def _padded(text):
-    """Lower-case ``text`` with spaces around every word, for word matching."""
-    text = str(text or "").lower()
-    for char in ",()-/":
-        text = text.replace(char, " ")
-    return " " + text + " "
-
-
-def _matches(group, words):
-    """Return True if the group name or a child name contains one of ``words``."""
-    names = [group.get("name")]
-    for child in group.get("stops") or []:
-        names.append(child.get("name"))
-
-    for name in names:
-        padded = _padded(name)
-        for word in words:
-            if " " + word + " " in padded:
-                return True
-    return False
-
-
-def _search(term, best):
-    """Search the API for ``term`` and update ``best`` with the stops found.
-
-    ``best`` has one place per entry in STOPS. Every stop area in the answer
-    is checked against all entries, so one search can find several stops.
-    If several stop areas match an entry, the busiest one is kept.
-    """
-    response = None
-    try:
-        gc.collect()
-        response = _open("stops/name/" + _url_encode(term))
-
-        for group in _iter_json_array(response.raw, b"stop_groups"):
-            if not _in_area(group):
-                continue
-
-            # Busy stop areas win. Areas without traffic and meta stops
-            # (a whole town) are only used if nothing better matches.
-            traffic = group.get("average_daily_stop_times") or 0
-            if group.get("area_type") == "META_STOP":
-                traffic = -1
-
-            for index, entry in enumerate(STOPS):
-                if not _matches(group, entry["match"]):
-                    continue
-                if best[index] is None or traffic > best[index]["traffic"]:
-                    best[index] = {
-                        "id": group.get("id"),
-                        "name": entry["name"],
-                        "traffic": traffic,
-                    }
-    finally:
-        if response is not None:
-            response.close()
-        gc.collect()
-
-
-def find_stops(town, limit=40):
-    """Find the stops in STOPS, in the same order as in STOPS.
-
-    Each stop is searched with its own search names first and then with
-    ``town`` as a last try. A stop that cannot be found is skipped, so the
-    list can be shorter.
-
-    Returns a list of dicts with 'id', 'name' and 'traffic', or None if no
-    stop could be found (see get_last_error).
-    """
-    best = [None] * len(STOPS)
-    searched = []  # each name is only sent to the API once
-    last_failure = ""
-
-    for index, entry in enumerate(STOPS):
-        for term in list(entry["search"]) + [town]:
-            if best[index] is not None:
-                break
-            if term in searched:
-                continue
-            searched.append(term)
-            try:
-                _search(term, best)
-            except Exception as error:
-                last_failure = _describe(error)
-                print("Trafiklab: search failed:", term, last_failure)
-
-    stops = []
-    for index, stop in enumerate(best):
-        if stop is None:
-            print("Trafiklab: stop not found:", STOPS[index]["name"])
-            continue
-        if any(found["id"] == stop["id"] for found in stops):
-            continue
-        print("Trafiklab: stop found:", stop["name"], stop["id"])
-        stops.append(stop)
-
-    if not stops:
-        _set_error(last_failure or "No stops found: " + town)
-        return None
-
-    _clear_error()
-    return stops[:limit]
-
-
 def _status(item):
-    """Return 'On time', 'Delayed' or 'Canceled' for a raw departure."""
     if item.get("canceled"):
         return "Canceled"
     if (item.get("delay") or 0) >= DELAY_THRESHOLD_S:
@@ -339,24 +241,19 @@ def _status(item):
 
 
 def _matches_transport(item, transport):
-    """Return True if the departure should be shown for this transport type."""
     if transport == TRANSPORT_ALL:
         return True
-    route = item.get("route") or {}
-    mode = (route.get("transport_mode") or "").upper()
+    mode = ((item.get("route") or {}).get("transport_mode") or "").upper()
     return mode == TRANSPORT_API_NAMES.get(transport, transport.upper())
 
 
 def _to_departure(item):
-    """Keep only the fields the UI needs, to save memory."""
+    """Only the fields the UI needs."""
     route = item.get("route") or {}
-    scheduled = item.get("scheduled") or ""
-    # "realtime" is missing when there is no live data
-    realtime = item.get("realtime") or scheduled
-
+    realtime = item.get("realtime") or item.get("scheduled") or ""  # no live data
     return {
-        "sort": realtime,  # ISO time, sorts correctly as text
-        "time": realtime[11:16],  # the HH:MM part
+        "sort": realtime,  # ISO time sorts correctly as text
+        "time": realtime[11:16],  # HH:MM
         "line": route.get("designation") or route.get("name") or "",
         "destination": route.get("direction") or "",
         "status": _status(item),
@@ -365,35 +262,27 @@ def _to_departure(item):
 
 
 def _sort_key(departure):
-    """Sort key that puts the earliest departure first."""
     return departure["sort"]
 
 
 def get_departures(stop_id, limit=15, transport=TRANSPORT_ALL):
-    """Get the next departures from a stop area.
-
-    Departures of other transport types are dropped before they are stored,
-    so filtering on 'Train' still fills the list with trains. Only the
-    ``limit`` earliest departures are kept in memory.
-
-    Returns a list (empty if there are none), or None if the request failed
-    (see get_last_error).
-    """
+    """The next ``limit`` departures of ``transport``: a list, or None on error."""
     response = None
     try:
-        gc.collect()
         response = _open("departures/" + str(stop_id))
-
+        # Skip other types before json.loads (checked again below)
+        needles = None
+        if transport != TRANSPORT_ALL:
+            mode = TRANSPORT_API_NAMES.get(transport, transport.upper()).encode()
+            needles = (b'"' + mode + b'"', b'"' + mode.lower() + b'"')
         kept = []
-        for item in _iter_json_array(response.raw, b"departures"):
-            if not _matches_transport(item, transport):
-                continue
-            kept.append(_to_departure(item))
-            # Keep the list sorted and drop the latest one when it is full
-            kept.sort(key=_sort_key)
-            if len(kept) > limit:
-                kept.pop()
-
+        for item in _iter_json_array(response.raw, b"departures", needles):
+            if _matches_transport(item, transport):
+                kept.append(_to_departure(item))
+                if len(kept) >= limit + EXTRA_DEPARTURES:
+                    break  # the rest are later
+        kept.sort(key=_sort_key)
+        del kept[limit:]
         _clear_error()
         return kept
     except Exception as error:
@@ -402,31 +291,25 @@ def get_departures(stop_id, limit=15, transport=TRANSPORT_ALL):
     finally:
         if response is not None:
             response.close()
-        gc.collect()
-
-
-# ResRobot travel planner (US5.3). It uses the same stop ids.
-TRIP_URL = "https://api.resrobot.se/v2.1/trip?format=json&passlist=0&numF="
 
 
 def _as_list(value):
-    """ResRobot gives a list for many items but a single object for one."""
+    """ResRobot gives a list for many items, an object for one."""
     if isinstance(value, list):
         return value
     return [value] if value else []
 
 
 def _place(place, key):
-    """Return a field of an Origin or Destination, '' if missing."""
     return (place or {}).get(key) or ""
 
 
-# Words in ResRobot line names and the transport types used in the app (US3.3)
+# Words in ResRobot line names -> transport types in the app (US3.3)
 LINE_TYPES = (("buss", "Bus"), ("tåg", "Train"), ("båt", "Ferry"), ("färja", "Ferry"))
 
 
 def _line_name(name):
-    """Turn "Länstrafik - Buss 6" into "Bus 6" and "Öresundståg 1076" into "Train 1076"."""
+    """"Länstrafik - Buss 6" -> "Bus 6", "Öresundståg 1076" -> "Train 1076"."""
     lower = name.lower()
     number = name.split(" ")[-1]
     for word, label in LINE_TYPES:
@@ -442,17 +325,12 @@ def _to_trip(trip):
         return None
     rides = []
     for leg in legs:
-        if leg.get("type") != "JNY":
-            continue
-        stop = _place(leg.get("Origin"), "name")
-        line = _line_name(leg.get("name") or "")
-        rides.append(
-            {
+        if leg.get("type") == "JNY":
+            rides.append({
                 "time": _place(leg.get("Origin"), "time")[:5],
-                "stop": stop.split(" (")[0],  # drop "(Karlskrona kn)"
-                "line": line,
-            }
-        )
+                "stop": _place(leg.get("Origin"), "name").split(" (")[0],  # no "(..kn)"
+                "line": _line_name(leg.get("name") or ""),
+            })
     return {
         "departure": _place(legs[0].get("Origin"), "time")[:5],
         "arrival": _place(legs[-1].get("Destination"), "time")[:5],
@@ -462,20 +340,12 @@ def _to_trip(trip):
 
 
 def get_trips(origin_id, dest_id, limit=5):
-    """Get the next journeys between two stops, or None if it failed."""
-    url = (
-        TRIP_URL
-        + str(limit)
-        + "&originId="
-        + str(origin_id)
-        + "&destId="
-        + str(dest_id)
-        + "&accessId="
-        + RESROBOT_API_KEY
-    )
+    """The next journeys between two stops, or None if it failed."""
+    url = "%s%d&originId=%s&destId=%s&accessId=%s" % (
+        TRIP_URL, limit, origin_id, dest_id, RESROBOT_API_KEY)
     response = None
     try:
-        gc.collect()
+        yield_to_ui()
         response = urequests.get(url)
         if response.status_code != 200:
             raise Exception("HTTP " + str(response.status_code))
@@ -494,4 +364,3 @@ def get_trips(origin_id, dest_id, limit=5):
     finally:
         if response is not None:
             response.close()
-        gc.collect()
