@@ -188,11 +188,13 @@ def _show_status(label, text, ok):
 
 
 def create_settings_screen(parent, stop_text, on_stop_changed, on_transport_changed,
-                           on_save, on_reset, transport="All", on_search=None):
+                           on_save, on_reset, transport="All", on_search=None,
+                           on_refresh=None):
     """Build the screen in ``parent`` (a tile) and return its widgets.
 
     ``stop_text`` is shown until the stops are set. The on_... functions are
-    called on a change, on Save (US3.4), Reset (US3.5) and a stop search (US3.2C).
+    called on a change, on Save (US3.4), Reset (US3.5), a stop search (US3.2C)
+    and Refresh (US4.2B).
     """
     setup_page(parent, 8)
     make_label(parent, "Settings", 0, FONT_BIG, COLOR_TEXT)
@@ -214,6 +216,10 @@ def create_settings_screen(parent, stop_text, on_stop_changed, on_transport_chan
     status_card = _make_section(parent, "Connection status", 100)  # US4.3
     wifi_label = make_label(status_card, "Wi-Fi: ...", 0, FONT_BIG, COLOR_MUTED)
     data_label = make_label(status_card, "Live data: ...", 0, FONT_BIG, COLOR_MUTED)
+    # Refresh on the right, next to the two lines: floating, not in the column (US4.2B)
+    refresh = make_button(status_card, "Refresh", COLOR_SEARCH, (130, CONTROL_HEIGHT), on_refresh, 10)
+    refresh.add_flag(lv.obj.FLAG.FLOATING)
+    refresh.align(lv.ALIGN.RIGHT_MID, 0, 0)
 
     # Save and Reset with a short message next to them
     button_row = lv.obj(parent)
@@ -266,4 +272,4 @@ def update_connection_status(screen, wifi_connected, data_ok):
     """Show if Wi-Fi is connected and if the last fetch worked (US4.3)."""
     _show_status(screen["wifi"], "Wi-Fi: Connected" if wifi_connected else "Wi-Fi: Offline",
                  wifi_connected)
-    _show_status(screen["data"], "Live data: OK" if data_ok else "Live data: Error", data_ok) 
+    _show_status(screen["data"], "Live data: OK" if data_ok else "Live data: Error", data_ok)
