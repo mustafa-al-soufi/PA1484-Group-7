@@ -135,48 +135,63 @@ def _make_dropdown(parent, options, selected, on_changed, font=FONT_BIG):
     return dropdown
 
 
-def _make_stop_search(row, on_search):
-    """Search field, Search button and keyboard for any stop (US3.2C).
+_keyboard = None  # ONE keyboard for all search fields, made when first needed
+_typing = [None, None]  # the field the keyboard writes to, and its on_search
 
-    ``on_search(text)`` is called on Search or on Enter of the keyboard.
-    """
-    field = lv.textarea(row)
+
+def _search_now(_event=None):
+    """Enter or Search: hide the keyboard and search for the field's text."""
+    _set_hidden(_keyboard, True)
+    field, on_search = _typing
+    if field is not None and on_search is not None:
+        on_search(field.get_text())
+
+
+def _show_keyboard(field, on_search):
+    global _keyboard
+    if _keyboard is None:
+        _keyboard = lv.keyboard(lv.layer_top())
+        _keyboard.set_style_text_font(ui_font(FONT_SMALL), 0)
+        try:
+            for mode, keys in ((lv.keyboard.MODE.TEXT_LOWER, _LOWER),
+                               (lv.keyboard.MODE.TEXT_UPPER, _UPPER)):
+                _keyboard.set_map(mode, keys, _CTRL)
+        except Exception as error:
+            print("Keyboard without å ä ö:", error)
+        _keyboard.add_event_cb(_search_now, lv.EVENT.READY, None)
+        _keyboard.add_event_cb(lambda _e: _set_hidden(_keyboard, True), lv.EVENT.CANCEL, None)
+    _typing[:] = [field, on_search]
+    _keyboard.set_textarea(field)
+    _set_hidden(_keyboard, False)
+
+
+def make_search_field(parent, width, on_search):
+    """A one-line stop search field; tapping it shows the shared keyboard.
+    ``on_search(text)`` is called on Enter."""
+    field = lv.textarea(parent)
     field.set_one_line(True)
     field.set_placeholder_text("Search for a stop")
-    field.set_size(190, CONTROL_HEIGHT)
+    field.set_size(width, CONTROL_HEIGHT)
     _dark(field, FONT_SMALL)
-    keyboard = lv.keyboard(lv.layer_top())
-    keyboard.set_textarea(field)
-    keyboard.set_style_text_font(ui_font(FONT_SMALL), 0)
-    keyboard.add_flag(lv.obj.FLAG.HIDDEN)
-    try:
-        for mode, keys in ((lv.keyboard.MODE.TEXT_LOWER, _LOWER), (lv.keyboard.MODE.TEXT_UPPER, _UPPER)):
-            keyboard.set_map(mode, keys, _CTRL)
-    except Exception as error:
-        print("Keyboard without å ä ö:", error)
-
-    def search(_event):
-        _set_hidden(keyboard, True)
-        if on_search is not None:
-            on_search(field.get_text())
-
-    field.add_event_cb(lambda _e: _set_hidden(keyboard, False), lv.EVENT.CLICKED, None)
-    keyboard.add_event_cb(search, lv.EVENT.READY, None)
-    keyboard.add_event_cb(lambda _e: _set_hidden(keyboard, True), lv.EVENT.CANCEL, None)
-    make_button(row, "Search", COLOR_SEARCH, (100, CONTROL_HEIGHT), search, 10)
-    return field, keyboard
+    field.add_event_cb(lambda _e: _show_keyboard(field, on_search), lv.EVENT.CLICKED, None)
+    return field
 
 
-def _show_stop(screen):
-    """The closed stop dropdown shows the selected name, cut so it never
-    reaches the arrow. The opened list keeps the full names."""
-    names, index = screen["stop_names"], screen["stop_dropdown"].get_selected()
+def show_selected(dropdown, names, keep):
+    """The closed dropdown shows the selected name, cut so it never reaches
+    the arrow; the opened list keeps the full names. ``keep`` (a dict) holds
+    the text, as LVGL keeps only a pointer."""
+    index = dropdown.get_selected()
     if index < len(names):
         name = names[index]
         if len(name) > STOP_TEXT_CHARS:
             name = name[: STOP_TEXT_CHARS - 3] + "..."
-        screen["stop_text"] = name  # LVGL keeps only a pointer: keep it alive
-        screen["stop_dropdown"].set_text(name)
+        keep[id(dropdown)] = name
+        dropdown.set_text(name)
+
+
+def _show_stop(screen):
+    show_selected(screen["stop_dropdown"], screen["stop_names"], screen)
 
 
 def _show_status(label, text, ok):
@@ -205,7 +220,9 @@ def create_settings_screen(parent, stop_text, on_stop_changed, on_transport_chan
     stop_row.set_style_pad_all(0, 0)
     stop_dropdown = _make_dropdown(stop_row, safe_text(stop_text), 0, on_stop_changed, FONT_SMALL)
     stop_dropdown.set_width(250)
-    search, keyboard = _make_stop_search(stop_row, on_search)
+    search = make_search_field(stop_row, 190, on_search)
+    make_button(stop_row, "Search", COLOR_SEARCH, (100, CONTROL_HEIGHT),
+                lambda _e: _show_keyboard(search, on_search) or _search_now(), 10)
 
     transport_card = _make_section(parent, "Transport type", CARD_HEIGHT)  # US3.3
     selected = TRANSPORT_TYPES.index(transport) if transport in TRANSPORT_TYPES else 0
@@ -238,7 +255,7 @@ def create_settings_screen(parent, stop_text, on_stop_changed, on_transport_chan
     message = make_label(button_row, "", 0, FONT_SMALL, COLOR_MUTED, wrap=True)
 
     screen = {"root": parent, "stop_dropdown": stop_dropdown, "search": search,
-              "keyboard": keyboard, "transport_dropdown": transport_dropdown,
+              "transport_dropdown": transport_dropdown,
               "wifi": wifi_label, "data": data_label, "message": message, "stop_names": []}
     stop_dropdown.add_event_cb(lambda _e: _show_stop(screen), lv.EVENT.VALUE_CHANGED, None)
     return screen
