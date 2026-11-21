@@ -1,236 +1,314 @@
 import sys
+import time
 
 import lvgl as lv
 
 from board_lvgl import start_board
 from debug_log import log
 
-from config import settings_manager
-
 from screens.departure import (
-    MAX_ROWS,
-    create_departure_screen,
-    show_message,
-    update_departures,
+    COLOR_MUTED, COLOR_TEXT, FONT_BIG, FONT_SMALL, MAX_DEPARTURES,
+    create_departure_screen, load_swedish_fonts, make_label, setup_page,
+    show_message, update_departures,
 )
-
+from screens.journey import (
+    create_journey_screen, get_journey_selection, set_journey_stops,
+    show_journey_message, show_trips,
+)
 from screens.settings import (
-    TRANSPORT_TYPES,
-    create_settings_screen,
-    set_selected_stop,
-    set_stops,
-    set_transport,
-    show_save_message,
-    update_connection_status,
+    TRANSPORT_TYPES, create_settings_screen, set_selected_stop, set_stops,
+    set_transport, show_save_message, update_connection_status,
 )
+from screens import settings as settings_manager  # saved defaults (US3.4)
+from services import trafiklab
+from services.departure_worker import DepartureWorker, is_connected
 
-from services import wifi
-from services.departure_worker import DepartureWorker
-
-# Town whose stops can be selected (US1.2B, US3.2B)
-TOWN = "Karlskrona"
-# Stop id to show at start-up. None = the busiest stop in TOWN.
-STOP_ID = None
-# Automatic refresh interval (US4.1)
-REFRESH_MS = 60_000
-# How often the UI checks if the background fetch has finished
-POLL_MS = 250
+TOWN = "Karlskrona"  # US1.2B, US3.2B
+STOP_ID = None  # start-up stop; None = the first fixed stop
+VERSION = "4"  # US1.1
+MEMBERS = ("Mustafa Ali Hussein Al-Soufi", "Berat Subasi", "Emanuel Gabro",
+           "Ahmad Elhassen", "Ismail Alkhasara")
+REFRESH_MS = 60_000  # automatic refresh (US4.1)
+POLL_MS = 250  # the UI checks for a finished fetch
+FIRST_FETCH_MS = 1500  # draw the start screen first
+RENDER_PERIOD_MS = 10  # redraw and read the touch on every LVGL run
+MAX_IDLE_MS = 10  # run_ui_loop: longest sleep
+TICK_CHECK_MS = 2000  # then check that time is not counted twice
+# log() writes the flash (stalls the screen): rare events only
 
 
 class Application:
     def __init__(self):
         self.display, self.touch, self.handler = start_board()
-
-        # Load the saved default settings (US3.4)
-        saved = settings_manager.load()
-        self.worker = DepartureWorker(TOWN, saved["stop_id"] or STOP_ID, MAX_ROWS)
+        load_swedish_fonts()  # å ä ö, or a/o if that does not work
+        saved = settings_manager.load()  # US3.4
+        # Departures for all pages
+        self.worker = DepartureWorker(TOWN, saved["stop_id"] or STOP_ID, MAX_DEPARTURES)
         if saved["stop_id"]:
             self.worker.stop_name = saved["stop_name"]
         self.worker.set_transport(saved["transport"])
-
-        self.stops = []  # selectable stops: dicts with 'id' and 'name'
-        self.selected_stop = None  # the stop picked in the dropdown
-        self.refresh_pending = False  # True when a new fetch must be started
+        self.stops = []  # dicts with 'id' and 'name'
+        self.selected_stop = self.journey_from = self.journey_to = None
+        # Set: poll_worker starts a fetch / journey search (US5.2)
+        self.refresh_pending = self.journey_pending = False
+        self.search_pending = None  # text of a stop search to start (US3.2C)
+        self.last_error = None  # an error is only logged once
 
         self.create_ui()
-
-        # Wi-Fi is managed by DepartureWorker in the background.
-        # Timers must be stored on self so they are not garbage collected
+        self.apply_stops(trafiklab.get_stops())  # fixed stops, no search
+        # Kept on self so they are not garbage collected
         self.poll_timer = lv.timer_create(self.poll_worker, POLL_MS, None)
+        # US4.1
         self.refresh_timer = lv.timer_create(self.request_refresh, REFRESH_MS, None)
-        self.request_refresh()
-
+        self.first_timer = lv.timer_create(self.request_refresh, FIRST_FETCH_MS, None)
+        self.first_timer.set_repeat_count(1)
         log("student application ready")
 
-    @staticmethod
-    def apply_tile_colors(tile, label, dark):
-        tile.set_style_bg_opa(lv.OPA.COVER, 0)
-        tile.set_style_bg_color(lv.color_hex(0x000000 if dark else 0xFFFFFF), 0)
-        label.set_style_text_color(lv.color_hex(0xFFFFFF if dark else 0x000000), 0)
+    def create_start_screen(self, tile):
+        "Name, version, group and members (US1.1)"
+        setup_page(tile, 12)
+        tile.set_flex_align(lv.FLEX_ALIGN.CENTER, lv.FLEX_ALIGN.CENTER, lv.FLEX_ALIGN.CENTER)
+        make_label(tile, "Karlskrona Transit", 0, FONT_BIG, COLOR_TEXT)
+        make_label(tile, "Version " + VERSION + " | Group 7", 0, FONT_SMALL, COLOR_MUTED)
+        card = lv.obj(tile)
+        card.remove_flag(lv.obj.FLAG.CLICKABLE)  # swipes go to the tileview
+        card.set_size(380, lv.SIZE_CONTENT)
+        card.set_style_bg_color(lv.color_hex(0x1B2A41), 0)
+        card.set_style_border_width(0, 0)
+        names = make_label(card, "\n".join(MEMBERS), 348, FONT_BIG, COLOR_TEXT, wrap=True)
+        names.set_style_text_align(lv.TEXT_ALIGN.CENTER, 0)
+        make_label(tile, "Swipe left for departures >", 0, FONT_SMALL, COLOR_MUTED)
 
     def create_ui(self):
-        "Function: Creates UI"
-        self.tileview = lv.tileview(lv.screen_active())
-        self.tileview.set_size(600, 450)
-        self.tileview.set_scrollbar_mode(lv.SCROLLBAR_MODE.OFF)
-
-        self.tile1 = self.tileview.add_tile(0, 0, lv.DIR.RIGHT)
-        self.tile2 = self.tileview.add_tile(1, 0, lv.DIR.LEFT | lv.DIR.RIGHT)
-        self.tile3 = self.tileview.add_tile(2, 0, lv.DIR.LEFT)
-
-        self.tile1_label = lv.label(self.tile1)
-        self.tile1_label.set_text(
-            "Karlskrona Transit\n\n"
-            "Version: 3\n"
-            "Group 7\n\n"
-            "Mustafa Ali Hussein Al-Soufi\n"
-            "Berat Subasi\n"
-            "Emanuel Gabro\n"
-            "Ahmad Elhassen\n"
-            "Ismail Alkhasara"
-        )
-        self.tile1_label.set_style_text_font(lv.font_montserrat_20, 0)
-        self.tile1_label.set_style_text_align(lv.TEXT_ALIGN.CENTER, 0)
-        self.tile1_label.center()
-        self.apply_tile_colors(self.tile1, self.tile1_label, False)
-
-        # Departure screen (US1.2B) with the refresh button (US4.2)
-        self.departure_list = create_departure_screen(
-            self.tile2, self.on_refresh_clicked
-        )
+        "The four screens in a tileview"
+        tiles = self.tileview = lv.tileview(lv.screen_active())
+        tiles.set_size(600, 450)
+        tiles.set_scrollbar_mode(lv.SCROLLBAR_MODE.OFF)
+        # Only the tileview paints a background
+        tiles.set_style_bg_opa(lv.OPA.COVER, 0)
+        tiles.set_style_bg_color(lv.color_hex(0x000000), 0)
+        both = lv.DIR.LEFT | lv.DIR.RIGHT
+        self.create_start_screen(tiles.add_tile(0, 0, lv.DIR.RIGHT))
+        self.departure_list = create_departure_screen(  # US1.2B, US4.2
+            tiles.add_tile(1, 0, both), self.reload)
         show_message(self.departure_list, "Loading...")
+        self.settings_screen = create_settings_screen(  # US3.1
+            tiles.add_tile(2, 0, both), "Loading...", self.on_stop_changed,
+            self.on_transport_changed, self.on_save_clicked, self.on_reset_clicked,
+            self.worker.transport, self.on_stop_search)
+        self.journey_screen = create_journey_screen(  # US5.1, US5.2
+            tiles.add_tile(3, 0, lv.DIR.LEFT), self.on_search_clicked)
 
-        # Settings screen (US3.1)
-        self.settings_screen = create_settings_screen(
-            self.tile3,
-            "Loading...",
-            self.on_stop_changed,
-            self.on_transport_changed,
-            self.on_save_clicked,
-            self.on_reset_clicked,
-            self.worker.transport,
-        )
+        # The fetch waits during swipes and journey scrolling
+        for widget in (tiles, self.journey_screen["results"]):
+            widget.add_event_cb(self.on_scroll, lv.EVENT.SCROLL_BEGIN, None)
+            widget.add_event_cb(self.on_scroll, lv.EVENT.SCROLL_END, None)
+        try:
+            lv.display_get_default().get_refr_timer().set_period(RENDER_PERIOD_MS)
+            self.touch._indev_drv.get_read_timer().set_period(RENDER_PERIOD_MS)
+        except Exception as error:
+            print("render tuning skipped:", error)
 
-    def request_refresh(self, timer=None):
-        "Function: Starts a background fetch of the departures (US4.1)"
-        if not self.worker.start():
-            log("refresh skipped: previous fetch still running")
+    def on_scroll(self, event):
+        "The fetch waits while the user swipes or scrolls"
+        trafiklab.set_scrolling(event.get_code() == lv.EVENT.SCROLL_BEGIN)
 
-    def on_refresh_clicked(self, _event):
-        "Function: Called when the user presses Refresh (US4.2)"
+    def request_refresh(self, _timer=None):
+        self.worker.start()
+
+    def reload(self, _event=None):
+        "Loading..., then a new fetch (US4.2)"
         show_message(self.departure_list, "Loading...")
-        self.refresh_pending = True  # poll_worker starts the fetch
-        log("manual refresh")
+        self.refresh_pending = True
+
+    def select_stop(self, index):
+        self.selected_stop = stop = self.stops[index]
+        self.worker.set_stop(stop["id"], stop["name"])
 
     def on_stop_changed(self, _event):
-        "Function: Called when the user picks another stop in the dropdown"
+        "Another stop picked"
         index = self.settings_screen["stop_dropdown"].get_selected()
-        if index >= len(self.stops):
-            return  # the stop list has not been loaded yet
-
-        self.selected_stop = self.stops[index]
-        self.worker.set_stop(self.selected_stop["id"], self.selected_stop["name"])
-        show_save_message(self.settings_screen, "")
-        show_message(self.departure_list, "Loading...")
-        self.refresh_pending = True
-        log("stop selected: " + self.selected_stop["name"])
+        if index < len(self.stops):
+            self.select_stop(index)
+            self.changed()
 
     def on_transport_changed(self, _event):
-        "Function: Called when the user picks another transport type (US3.3)"
+        "Another transport type picked (US3.3)"
         index = self.settings_screen["transport_dropdown"].get_selected()
-        if index >= len(TRANSPORT_TYPES):
-            return
+        if index < len(TRANSPORT_TYPES):
+            self.worker.set_transport(TRANSPORT_TYPES[index])
+            self.changed()
 
-        self.worker.set_transport(TRANSPORT_TYPES[index])
+    def changed(self):
         show_save_message(self.settings_screen, "")
-        show_message(self.departure_list, "Loading...")
-        self.refresh_pending = True
-        log("transport selected: " + TRANSPORT_TYPES[index])
+        self.reload()
 
     def on_save_clicked(self, _event):
-        "Function: Saves the current stop and transport type as default (US3.4)"
+        "Saves the stop and transport type as default (US3.4)"
         if self.selected_stop is None:
             show_save_message(self.settings_screen, "No stop to save yet", False)
             return
-
-        ok = settings_manager.save(
-            {
-                "stop_id": self.selected_stop["id"],
-                "stop_name": self.selected_stop["name"],
-                "transport": self.worker.transport,
-            }
-        )
-        show_save_message(
-            self.settings_screen,
-            "Saved as default" if ok else "Could not save",
-            ok,
-        )
+        ok = settings_manager.save({"stop_id": self.selected_stop["id"],
+                                    "stop_name": self.selected_stop["name"],
+                                    "transport": self.worker.transport})
+        show_save_message(self.settings_screen, "Saved as default" if ok else "Could not save", ok)
         log("settings saved" if ok else "settings save failed")
 
     def on_reset_clicked(self, _event):
-        "Function: Restores the saved default settings (US3.5)"
+        "Restores the saved defaults (US3.5)"
         saved = settings_manager.load()
         self.worker.set_transport(saved["transport"])
         set_transport(self.settings_screen, saved["transport"])
-
-        # Stop: the saved one, else STOP_ID, else the busiest (first in list)
-        if self.stops:
-            wanted_id = saved["stop_id"] or STOP_ID
-            index = 0
-            for position, stop in enumerate(self.stops):
-                if stop["id"] == wanted_id:
-                    index = position
-            self.selected_stop = self.stops[index]
-            self.worker.set_stop(self.selected_stop["id"], self.selected_stop["name"])
-            set_selected_stop(self.settings_screen, index)
-
+        if saved["stop_id"]:  # may be a searched stop, not in the list
+            self.worker.set_stop(saved["stop_id"], saved["stop_name"])
+            self.apply_stops(self.stops)
+        elif self.stops:  # else the first
+            self.select_stop(0)
+            set_selected_stop(self.settings_screen, 0)
         show_save_message(self.settings_screen, "Reset to default")
-        show_message(self.departure_list, "Loading...")
-        self.refresh_pending = True
-        log("settings reset to default")
+        self.reload()
+
+    def stop_index(self, stop_id):
+        "Position of ``stop_id`` in the stops, else -1"
+        for index, stop in enumerate(self.stops):
+            if stop["id"] == stop_id:
+                return index
+        return -1
 
     def apply_stops(self, stops):
-        "Function: Fills the stop dropdown with the stops from Trafiklab"
-        current_id = self.worker.stop_id
-
-        # A stop set by STOP_ID or saved earlier may be missing: add it on top
-        if current_id is not None and not any(s["id"] == current_id for s in stops):
-            stops.insert(
-                0, {"id": current_id, "name": self.worker.stop_name or "Selected stop"}
-            )
-
+        "Fills the stop dropdowns; the current stop stays in them, on top"
         self.stops = stops
-        selected = 0
-        for index, stop in enumerate(stops):
-            if stop["id"] == current_id:
-                selected = index
+        selected = self.stop_index(self.worker.stop_id)
+        if selected < 0:
+            stops.insert(0, {"id": self.worker.stop_id, "name": self.worker.stop_name or "Selected stop"})
+            selected = 0
         self.selected_stop = stops[selected]
-        set_stops(self.settings_screen, [stop["name"] for stop in stops], selected)
-        log("stops loaded: " + str(len(stops)))
+        names = [stop["name"] for stop in stops]
+        set_stops(self.settings_screen, names, selected)
+        set_journey_stops(self.journey_screen, names)
+
+    def on_stop_search(self, text):
+        "Stop search (US3.2C); an empty search brings back the fixed stops"
+        text = text.strip()
+        if text:
+            self.search_pending = text  # poll_worker starts it
+            show_save_message(self.settings_screen, "Searching...")
+        else:
+            self.apply_stops(trafiklab.get_stops())
+            show_save_message(self.settings_screen, "")
+
+    def show_found_stops(self, stops):
+        "The stop search finished: the stops go into the dropdown, opened"
+        screen = self.settings_screen
+        if not stops:
+            show_save_message(screen, "Search failed" if stops is None else "No stops found", False)
+            return
+        count = len(stops)
+        self.apply_stops(stops)
+        show_save_message(screen, "%d stops found" % count)
+        screen["stop_dropdown"].open()
+
+    def on_search_clicked(self, _event):
+        "Search pressed on the journey screen (US5.2)"
+        screen = self.journey_screen
+        if not self.stops:
+            show_journey_message(screen, "Stops are still loading", False)
+            return
+        from_index, to_index = get_journey_selection(screen)
+        if max(from_index, to_index) >= len(self.stops):
+            return
+        if from_index == to_index:
+            show_journey_message(screen, "Choose two different stops", False)
+            return
+        self.journey_from = self.stops[from_index]
+        self.journey_to = self.stops[to_index]
+        show_journey_message(screen, self.journey_from["name"] + " -> " + self.journey_to["name"])
+        show_trips(screen, None, "Searching...")
+        self.journey_pending = True  # US5.3
 
     def poll_worker(self, timer=None):
-        "Function: Updates the screens when a background fetch has finished"
-        stops = self.worker.take_stops()
-        if stops:
-            self.apply_stops(stops)
+        "An error is shown, it never stops the display"
+        try:
+            self.check_worker()
+        except Exception as error:
+            text = "Error: %r" % (error,)
+            sys.print_exception(error)
+            if text != self.last_error:
+                self.last_error = text
+                log("poll " + text)
+                show_message(self.departure_list, text)
 
-        # New selection or manual refresh: drop the old result and fetch again
-        if self.refresh_pending:
+    def check_worker(self):
+        "Shows finished fetches"
+        if trafiklab.is_scrolling():
+            return  # nothing new is drawn during a swipe
+        journey = self.worker.take_journey()  # US5.3
+        if journey is not None:
+            show_trips(self.journey_screen, journey[0], "Could not fetch journeys\n" + journey[1])
+        found = self.worker.take_stops()  # US3.2C
+        if found is not None:
+            self.show_found_stops(found[0])
+        if self.refresh_pending:  # drop the old result, fetch again
             self.worker.take_result()
-            if self.worker.start():
-                self.refresh_pending = False
+            self.refresh_pending = not self.worker.start()
             return
-
+        if self.journey_pending:
+            self.journey_pending = not self.worker.start(
+                (self.journey_from["id"], self.journey_to["id"]))
+            return
+        if self.search_pending:
+            if self.worker.start(search=self.search_pending):
+                self.search_pending = None
+            return
         result = self.worker.take_result()
-        if result is None:
-            return  # still fetching, or nothing new
+        if result is not None:
+            departures, error = result
+            update_departures(self.departure_list, departures, error)
+            update_connection_status(self.settings_screen, is_connected(), departures is not None)
 
-        departures, error = result
-        update_departures(self.departure_list, departures, error)
-        update_connection_status(
-            self.settings_screen, wifi.is_connected(), departures is not None
-        )
-        log("departures: " + ("error" if departures is None else str(len(departures))))
+
+def show_fatal(error):
+    "Shows a start-up error instead of a black screen"
+    try:
+        text = "Start-up error:\n%r\nSee debug.log" % (error,)
+        make_label(lv.screen_active(), text, 560, FONT_BIG, 0xF44336, wrap=True).center()
+    except Exception:
+        pass  # the display did not start
+
+
+def run_ui_loop(handler):
+    "Runs LVGL when it has work, not every 33 ms; else the TaskHandler"
+    if sys.implementation.name != "micropython":
+        return  # PC tests have no real LVGL
+    try:
+        handler.disable()
+    except Exception as error:
+        print("UI loop skipped:", error)
+        return
+    try:
+        started = last = time.ticks_ms()
+        started_tick = lv.tick_get()
+        checked = False
+        while True:
+            now = time.ticks_ms()
+            lv.tick_inc(time.ticks_diff(now, last))
+            last = now
+            wait = MAX_IDLE_MS
+            try:
+                wait = lv.task_handler()  # ms until LVGL has work again
+            except Exception as error:
+                sys.print_exception(error)
+            if not isinstance(wait, int):
+                wait = MAX_IDLE_MS
+            # Is the time counted twice (animations twice as fast)?
+            if not checked and time.ticks_diff(now, started) >= TICK_CHECK_MS:
+                checked = True
+                if lv.tick_elaps(started_tick) > time.ticks_diff(now, started) * 3 // 2:
+                    print("UI loop stopped: LVGL time is already counted")
+                    return
+            time.sleep_ms(max(1, min(wait, MAX_IDLE_MS)))  # the fetch runs too
+    finally:
+        handler.enable()  # for example after Ctrl+C
 
 
 try:
@@ -238,4 +316,7 @@ try:
 except Exception as error:
     log("FATAL: %r" % (error,))
     sys.print_exception(error)
+    show_fatal(error)
     raise
+
+run_ui_loop(app.handler)
