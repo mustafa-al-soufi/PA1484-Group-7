@@ -52,6 +52,7 @@ class Application:
         # Set: poll_worker starts a fetch / journey search (US5.2)
         self.refresh_pending = self.journey_pending = False
         self.search_pending = None  # text of a stop search to start (US3.2C)
+        self.refreshing = False  # Refresh pressed: show the result (US4.2B)
         self.last_error = None  # an error is only logged once
 
         self.create_ui()
@@ -89,13 +90,12 @@ class Application:
         tiles.set_style_bg_color(lv.color_hex(0x000000), 0)
         both = lv.DIR.LEFT | lv.DIR.RIGHT
         self.create_start_screen(tiles.add_tile(0, 0, lv.DIR.RIGHT))
-        self.departure_list = create_departure_screen(  # US1.2B, US4.2
-            tiles.add_tile(1, 0, both), self.reload)
+        self.departure_list = create_departure_screen(tiles.add_tile(1, 0, both))  # US1.2B
         show_message(self.departure_list, "Loading...")
         self.settings_screen = create_settings_screen(  # US3.1
             tiles.add_tile(2, 0, both), "Loading...", self.on_stop_changed,
             self.on_transport_changed, self.on_save_clicked, self.on_reset_clicked,
-            self.worker.transport, self.on_stop_search)
+            self.worker.transport, self.on_stop_search, self.on_refresh_clicked)
         self.journey_screen = create_journey_screen(  # US5.1, US5.2
             tiles.add_tile(3, 0, lv.DIR.LEFT), self.on_search_clicked)
 
@@ -120,6 +120,12 @@ class Application:
         "Loading..., then a new fetch (US4.2)"
         show_message(self.departure_list, "Loading...")
         self.refresh_pending = True
+
+    def on_refresh_clicked(self, _event):
+        "Refresh on the settings screen (US4.2B)"
+        show_save_message(self.settings_screen, "Refreshing...")
+        self.refreshing = True
+        self.reload()
 
     def select_stop(self, index):
         self.selected_stop = stop = self.stops[index]
@@ -265,6 +271,10 @@ class Application:
             departures, error = result
             update_departures(self.departure_list, departures, error)
             update_connection_status(self.settings_screen, is_connected(), departures is not None)
+            if self.refreshing:
+                self.refreshing = False
+                show_save_message(self.settings_screen, "Departures updated" if departures is not None
+                                  else "Refresh failed", departures is not None)
 
 
 def show_fatal(error):

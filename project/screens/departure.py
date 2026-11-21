@@ -1,4 +1,4 @@
-"""Departure screen (US1.2B, US4.2): a paged departure board and Refresh."""
+"""Departure screen (US1.2B): a paged departure board (Refresh: settings, US4.2B)."""
 
 import lvgl as lv
 
@@ -264,11 +264,11 @@ def _make_cell(parent, width, x, y):
     return label
 
 
-def create_departure_screen(parent, on_refresh=None):
-    """Build the screen in ``parent`` (a tile). Refresh calls ``on_refresh``."""
+def create_departure_screen(parent):
+    """Build the screen in ``parent`` (a tile)."""
     setup_page(parent, 4)
 
-    # Title (grows, so the rest is at the right edge), pages and Refresh
+    # Title (grows, so the page buttons are at the right edge)
     title_row = _make_row(parent, 44)
     make_label(title_row, "Departures", 0, FONT_BIG, COLOR_TEXT).set_flex_grow(1)
     screen = {"departures": [], "page": 0}
@@ -278,7 +278,6 @@ def create_departure_screen(parent, on_refresh=None):
     screen["page_label"].set_style_text_align(lv.TEXT_ALIGN.CENTER, 0)
     screen["down"] = make_button(title_row, lv.SYMBOL.DOWN, COLOR_REFRESH,
                                  PAGE_BUTTON_SIZE, lambda _e: change_page(screen, 1))
-    make_button(title_row, "Refresh", COLOR_REFRESH, (130, 38), on_refresh)
 
     header = _make_row(parent, 30)
     for text, width in (("Time", COL_TIME), ("Line", COL_LINE),
