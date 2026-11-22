@@ -94,24 +94,24 @@ outcome and the date of the last run.
 
 | ID | Requirement | Steps | Expected result | Result |
 |---|---|---|---|---|
-| M1 | US1.1 | Power on the board. | The start screen shows "Karlskrona Transit", the version, Group 7 and the five member names. | Pass (2026-11-21) |
-| M2 | US2.1 | Swipe left and right between all four screens. | Each swipe moves to the next or previous screen: start, departures, settings, journeys. | Pass (2026-11-21) |
-| M3 | US1.2B | Open the departure screen and wait until it has loaded. | Live departures for Karlskrona Centralstation show time, line, destination and status, in time order. | Pass (2026-11-21) |
-| M4 | US1.2B | With more than six departures, press the down and up arrows. | Page 2/2 shows the next departures; the up arrow goes back to 1/2. | Pass (2026-11-21) |
-| M5 | US1.2B | Choose a stop with å, ä or ö in its name (for example Campus Gräsvik). | å, ä and ö are shown correctly, not as boxes. | Pass (2026-11-21) |
-| M6 | US3.1, US3.2B | Open the settings screen and choose another stop in the Stop dropdown. | The departure screen shows "Loading...", then the departures of the new stop. | Pass (2026-11-21) |
-| M7 | US3.2C | Tap the search field, type "Lyckeby" with the on-screen keyboard and press Enter. | The keyboard closes and the dropdown opens with the stops found; picking one shows its departures. | Pass (2026-11-21) |
-| M8 | US3.3 | Choose Bus, Train, Ferry and All in the Transport type dropdown. | The departure screen only shows that type; All shows every type. | Pass (2026-11-21) |
-| M9 | US3.4 | Choose a stop and a transport type, press Save as Default, then restart the board. | After the restart the saved stop and transport type are used. | Pass (2026-11-21) |
-| M10 | US3.5 | Change the stop, then press Reset to Default. | The saved stop and transport type come back and "Reset to default" is shown. | Pass (2026-11-21) |
-| M11 | US4.1 | Stay on the departure screen for 2 minutes. | The departures update about every 60 seconds without any input. | Pass (2026-11-21) |
-| M12 | US4.2B | Press Refresh on the settings screen. | "Refreshing..." is shown, then "Departures updated". | Pass (2026-11-21) |
-| M13 | US4.3 | Turn off the Wi-Fi network (or hotspot) and wait for the next refresh. | The status shows "Live data: Error", and Wi-Fi shows Offline once the connection is lost. | Pass (2026-11-21) |
-| M14 | US5.1, US5.2 | Open the journey screen, choose two different stops and press Search. | "Searching..." is shown, then a list of journeys. | Pass (2026-11-21) |
-| M15 | US5.2 | Choose the same stop in From and To and press Search. | "Choose two different stops" is shown and nothing is searched. | Pass (2026-11-21) |
-| M16 | US5.2B | Search for a stop in the From field, then in the To field. | Each search fills only its own dropdown. | Pass (2026-11-21) |
-| M17 | US5.3, US5.3B | Search for a journey between two stops that needs at least one change. | At most five journeys, sorted by arrival; the first is marked "Best" in green; each ride shows its time, line and stop. | Pass (2026-11-21) |
-| M18 | NF3 | Look at the departure and journey screens. | "Data: Trafiklab.se (CC BY 4.0)" is shown at the bottom. | Pass (2026-11-21) |
+| M1 | US1.1 | Power on the board. | The start screen shows "Karlskrona Transit", the version, Group 7 and the five member names. | Pass (2026-11-22) |
+| M2 | US2.1 | Swipe left and right between all four screens. | Each swipe moves to the next or previous screen: start, departures, settings, journeys. | Pass (2026-11-22) |
+| M3 | US1.2B | Open the departure screen and wait until it has loaded. | Live departures for Karlskrona Centralstation show time, line, destination and status, in time order. | Pass (2026-11-22) |
+| M4 | US1.2B | With more than six departures, press the down and up arrows. | Page 2/2 shows the next departures; the up arrow goes back to 1/2. | Pass (2026-11-22) |
+| M5 | US1.2B | Choose a stop with å, ä or ö in its name (for example Campus Gräsvik). | å, ä and ö are shown correctly, not as boxes. | Pass (2026-11-22) |
+| M6 | US3.1, US3.2B | Open the settings screen and choose another stop in the Stop dropdown. | The departure screen shows "Loading...", then the departures of the new stop. | Pass (2026-11-22) |
+| M7 | US3.2C | Tap the search field, type "Lyckeby" with the on-screen keyboard and press Enter. | The keyboard closes and the dropdown opens with the stops found; picking one shows its departures. | Pass (2026-11-22) |
+| M8 | US3.3 | Choose Bus, Train, Ferry and All in the Transport type dropdown. | The departure screen only shows that type; All shows every type. | Pass (2026-11-22) |
+| M9 | US3.4 | Choose a stop and a transport type, press Save as Default, then restart the board. | After the restart the saved stop and transport type are used. | Pass (2026-11-22) |
+| M10 | US3.5 | Change the stop, then press Reset to Default. | The saved stop and transport type come back and "Reset to default" is shown. | Pass (2026-11-22) |
+| M11 | US4.1 | Stay on the departure screen for 2 minutes. | The departures update about every 60 seconds without any input. | Pass (2026-11-22) |
+| M12 | US4.2B | Press Refresh on the settings screen. | "Refreshing..." is shown, then "Departures updated". | Pass (2026-11-22) |
+| M13 | US4.3 | Turn off the Wi-Fi network (or hotspot) and wait for the next refresh. | The status shows "Live data: Error", and Wi-Fi shows Offline once the connection is lost. | Pass (2026-11-22) |
+| M14 | US5.1, US5.2 | Open the journey screen, choose two different stops and press Search. | "Searching..." is shown, then a list of journeys. | Pass (2026-11-22) |
+| M15 | US5.2 | Choose the same stop in From and To and press Search. | "Choose two different stops" is shown and nothing is searched. | Pass (2026-11-22) |
+| M16 | US5.2B | Search for a stop in the From field, then in the To field. | Each search fills only its own dropdown. | Pass (2026-11-22) |
+| M17 | US5.3, US5.3B | Search for a journey between two stops that needs at least one change. | At most five journeys, sorted by arrival; the first is marked "Best" in green; each ride shows its time, line and stop. | Pass (2026-11-22) |
+| M18 | NF3 | Look at the departure and journey screens. | "Data: Trafiklab.se (CC BY 4.0)" is shown at the bottom. | Pass (2026-11-22) |
 
 ## Known limitations
 
@@ -120,11 +120,10 @@ outcome and the date of the last run.
   new file or a few hundred extra bytes in a full file can push the last files
   out of the image. The board then starts with a black screen. Check the size
   before adding code.
-- **Swipe speed.** Drawing one frame of a swipe takes about 170-195 ms on the
-  device, so swipes run at about 5 frames per second and feel slow. About
-  70 ms of that is spent even on an empty screen, because each frame is sent
-  to the display in ten strips. The unit tests cannot measure this, since the
-  PC uses a fake display.
+- **Swipe speed.** Swiping between screens is slower than on a phone. The
+  device needs a long time to draw each frame of a swipe, so the movement is
+  not smooth. The unit tests cannot measure this, since the PC uses a fake
+  display.
 - **What the PC tests cannot check.** The real screen, touch, timers, Wi-Fi
   and the live Trafiklab and ResRobot APIs only exist on the device. They are
   covered by the manual tests above.
