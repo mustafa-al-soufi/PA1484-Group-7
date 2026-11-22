@@ -1,5 +1,4 @@
-"""Background worker: departures, journeys, stop searches, Wi-Fi. No display or
-files; one reused thread (saves RAM for TLS)."""
+"""Wi-Fi and network jobs in one reused thread (US3.2C, US4, US5.3)."""
 
 import _thread
 import gc
@@ -11,10 +10,13 @@ from secrets import WIFI_PASSWORD, WIFI_SSID
 from services import trafiklab
 
 WORKER_STACK_SIZE = 32 * 1024
-IDLE_MS = 100  # sleep when idle
+IDLE_MS = 100
 
-# No sleep_ms in PC tests: the thread ends when idle
-_sleep_ms = getattr(time, "sleep_ms", None)
+_sleep_ms = getattr(time, "sleep_ms", None)  # None in PC tests: thread ends
+
+
+class _NoLock:  # PC tests
+    __enter__ = __exit__ = lambda *a: None
 
 
 def is_connected():
@@ -22,11 +24,14 @@ def is_connected():
 
 
 def connect(timeout_ms=15_000):
-    """Wi-Fi from secrets.py. Blocks: worker only (no log())."""
     print("connecting to Wi-Fi SSID: " + WIFI_SSID)
     station = network.WLAN(network.STA_IF)
     station.active(True)
-    if not station.isconnected():
+    try:
+        if station.status() != network.STAT_CONNECTING:
+            station.connect(WIFI_SSID, WIFI_PASSWORD)
+    except OSError:
+        station.disconnect()
         station.connect(WIFI_SSID, WIFI_PASSWORD)
     started = time.ticks_ms()
     while not station.isconnected() and time.ticks_diff(time.ticks_ms(), started) < timeout_ms:
@@ -37,15 +42,16 @@ def connect(timeout_ms=15_000):
 class DepartureWorker:
     def __init__(self, town, stop_id=None, limit=15):
         self.town = town
-        first = trafiklab.STOPS[0]  # default
+        first = trafiklab.STOPS[0]
         self.stop_id = stop_id or first["id"]
         self.stop_name = "" if stop_id else first["name"]
         self.transport = trafiklab.TRANSPORT_ALL
         self.limit = limit
-        self.busy = False  # from start() until the result is ready
+        self.busy = False
         self._alive = False
-        self._result = self._journey_result = self._stops = None
-        self._journey = self._search = None  # US5.3, US3.2C
+        self._result = self._journey_result = self._stops = self._job = None
+        lock = getattr(_thread, "allocate_lock", None)
+        self._lock = lock() if lock else _NoLock()
 
     def set_stop(self, stop_id, stop_name):
         self.stop_id = stop_id
@@ -55,31 +61,37 @@ class DepartureWorker:
         self.transport = transport  # US3.3
 
     def start(self, journey=None, search=None):
-        """Departures, trips (journey=(from, to)) or stops (search). False if busy."""
+        "False if busy"
         if self.busy:
             return False
-        self._journey, self._search = journey, search
+        self._job = (journey, search, self.stop_id, self.limit, self.transport)  # snapshot
         self.busy = True
         if self._alive:
-            return True  # the thread picks up the job
+            return True
         try:
             self._alive = True
             _thread.stack_size(WORKER_STACK_SIZE)
             _thread.start_new_thread(self._loop, ())
         except Exception as error:
-            self._alive = self.busy = False  # never stuck busy
+            self._alive = self.busy = False
             print("Worker: no thread:", error)
             return False
         return True
 
-    # take_...(): once, then None
-    def take_result(self):
-        result, self._result = self._result, None
+    def _take(self, name):
+        with self._lock:
+            result = getattr(self, name)
+            setattr(self, name, None)
         return result
 
+    def take_result(self):
+        return self._take("_result")
+
     def take_journey(self):
-        result, self._journey_result = self._journey_result, None
-        return result
+        return self._take("_journey_result")
+
+    def take_stops(self):  # US3.2C
+        return self._take("_stops")
 
     def take_stops(self):  # US3.2C
         result, self._stops = self._stops, None
@@ -96,7 +108,7 @@ class DepartureWorker:
                 _sleep_ms(IDLE_MS)
 
     def _run(self):
-        journey, search = self._journey, self._search
+        journey, search, stop_id, limit, transport = self._job
         data, error = None, ""
         try:
             if not is_connected():
@@ -108,17 +120,15 @@ class DepartureWorker:
             elif journey is not None:
                 data = trafiklab.get_trips(journey[0], journey[1])
             else:
-                data = trafiklab.get_departures(self.stop_id, self.limit, self.transport)
+                data = trafiklab.get_departures(stop_id, limit, transport)
             if data is None and not error:
                 error = trafiklab.get_last_error()
-        except Exception as exc:
-            error = type(exc).__name__
-        if search is not None:
-            self._stops = (data, error)
-        elif journey is None:
-            self._result = (data, error)
-        else:
-            self._journey_result = (data, error)
+        except Exception as exception:
+            error = type(exception).__name__
+        name = ("_stops" if search is not None
+                else "_result" if journey is None else "_journey_result")
+        with self._lock:
+            setattr(self, name, (data, error))
         trafiklab.yield_to_ui()  # no gc during a swipe
         gc.collect()
-        self.busy = False 
+        self.busy = False
