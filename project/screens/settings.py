@@ -1,23 +1,98 @@
-"""Settings screen (US3.1): stop, transport type, save/reset, connection."""
+"""Settings screen (US3.1-US3.5, US4.2B, US4.3): stop and stop search,
+transport type, save/reset, connection status and Refresh. The saved defaults
+are here too: a file of their own costs 4 KB of flash.
+"""
+
+import json
+import os
 
 import lvgl as lv
 
 from screens.departure import (
     COLOR_BG, COLOR_CANCELED, COLOR_MUTED, COLOR_OK, COLOR_TEXT, FONT_BIG,
-    FONT_SMALL, make_button, make_label, safe_text, setup_page, ui_font,
+    FONT_SMALL, _set_hidden, line_height, make_button, make_label, make_row,
+    safe_text, setup_page, ui_font,
 )
+
+TRANSPORT_TYPES = ("All", "Bus", "Train", "Ferry")  # dropdown order (US3.3)
+
+SETTINGS_FILE = "settings.json"
+DEFAULTS = {"stop_id": None, "stop_name": "", "transport": "All"}  # None = first stop
 
 COLOR_CARD = 0x1B2A41
 COLOR_SAVE = 0x2E7D32
 COLOR_RESET = 0x455A64
-DROPDOWN_LIST_HEIGHT = 220  # height of an opened dropdown list
+COLOR_SEARCH = 0x2E5E9E
+DROPDOWN_LIST_HEIGHT = 220
+# Fixed heights, so a card is title + one row: 10 + 18 + 6 + 38 + 10
+CONTROL_HEIGHT = 38  # dropdowns, the search field and its button
+CARD_HEIGHT = 82
+STOP_TEXT_CHARS = 24  # longer names are cut in the closed dropdown
 
-# Same order as in the dropdown (US3.3)
-TRANSPORT_TYPES = ("All", "Bus", "Train", "Ferry")
+# Keyboard keys with å ä ö (US3.2C). LVGL keeps only a pointer: module level.
+_KEYS_LOWER = [
+    "1#", "q", "w", "e", "r", "t", "y", "u", "i", "o", "p", "å", lv.SYMBOL.BACKSPACE, "\n",
+    "ABC", "a", "s", "d", "f", "g", "h", "j", "k", "l", "ö", "ä", lv.SYMBOL.NEW_LINE, "\n",
+    "_", "-", "z", "x", "c", "v", "b", "n", "m", ".", ",", ":", "\n",
+    lv.SYMBOL.KEYBOARD, lv.SYMBOL.LEFT, " ", lv.SYMBOL.RIGHT, lv.SYMBOL.OK, "",
+]
+_WIDE_KEYS = ("1#", "ABC", "abc", lv.SYMBOL.BACKSPACE, lv.SYMBOL.NEW_LINE)
+# MicroPython's upper() only changes a-z
+_CAPITALS = {"å": "Å", "ä": "Ä", "ö": "Ö", "ABC": "abc"}
+
+# --- Saved defaults (US3.4, US3.5): a missing or broken file = the defaults ---
 
 
-def _make_section(parent, title, height):
-    """Create a dark card with a small title."""
+def defaults():
+    return dict(DEFAULTS)
+
+
+def _clean(data):
+    """Valid settings from ``data``: unknown keys dropped, bad values = defaults."""
+    settings = defaults()
+    if not isinstance(data, dict):
+        return settings
+    if data.get("stop_id") is not None:
+        settings["stop_id"] = str(data["stop_id"])
+        settings["stop_name"] = str(data.get("stop_name") or "")
+    if data.get("transport") in TRANSPORT_TYPES:
+        settings["transport"] = data["transport"]
+    return settings
+
+
+def load():
+    try:
+        with open(SETTINGS_FILE) as file:
+            return _clean(json.load(file))
+    except OSError:
+        return defaults()  # nothing saved yet
+    except ValueError:
+        print("Settings file is damaged, using defaults")
+        return defaults()
+
+
+def save(settings):
+    """True if it worked. A power cut while saving keeps the old file."""
+    temporary_path = SETTINGS_FILE + ".tmp"
+    try:
+        with open(temporary_path, "w") as file:
+            json.dump(_clean(settings), file)
+        try:
+            os.remove(SETTINGS_FILE)  # rename() does not replace a file
+        except OSError:
+            pass
+        os.rename(temporary_path, SETTINGS_FILE)
+        return True
+    except Exception as error:
+        print("Could not save settings:", error)
+        return False
+
+
+# --- Widgets, also used by the journey screen ---
+
+
+def make_section(parent, title, height):
+    """A dark card with a small title."""
     card = lv.obj(parent)
     card.set_width(lv.pct(100))
     card.set_height(height)
@@ -28,37 +103,132 @@ def _make_section(parent, title, height):
     card.set_style_pad_all(10, 0)
     card.set_style_pad_row(6, 0)
     card.remove_flag(lv.obj.FLAG.SCROLLABLE)
-    card.remove_flag(lv.obj.FLAG.CLICKABLE)  # swipes go to the tileview
+    card.remove_flag(lv.obj.FLAG.CLICKABLE)  # so swipes reach the tileview
     card.set_flex_flow(lv.FLEX_FLOW.COLUMN)
     make_label(card, title, 0, FONT_SMALL, COLOR_MUTED)
     return card
 
 
-def _make_dropdown(parent, options, selected, on_changed):
-    """Create a dropdown (one option per line) that calls ``on_changed``."""
+def _dark_style(widget, font):
+    widget.set_style_text_font(ui_font(font), 0)
+    widget.set_style_pad_ver(max(0, (CONTROL_HEIGHT - line_height(ui_font(font)) - 4) // 2), 0)
+    widget.set_style_text_color(lv.color_hex(COLOR_TEXT), 0)
+    widget.set_style_bg_color(lv.color_hex(COLOR_BG), 0)
+    widget.set_style_border_color(lv.color_hex(COLOR_MUTED), 0)
+
+
+def make_dropdown(parent, options, selected, on_changed, font=FONT_BIG):
+    """A dropdown (one option per line) that calls ``on_changed``."""
     dropdown = lv.dropdown(parent)
-    dropdown.set_width(lv.pct(100))
+    dropdown.set_size(lv.pct(100), CONTROL_HEIGHT)
     dropdown.set_options(options)
     dropdown.set_selected(selected)
-    dropdown.set_style_text_font(ui_font(FONT_BIG), 0)
-    dropdown.set_style_text_color(lv.color_hex(COLOR_TEXT), 0)
-    dropdown.set_style_bg_color(lv.color_hex(COLOR_BG), 0)
-    dropdown.set_style_border_color(lv.color_hex(COLOR_MUTED), 0)
-    try:  # the opened list; some LVGL builds lack some of these
+    _dark_style(dropdown, font)
+
+    def style_list(_event):  # the list only exists while it is open
         option_list = dropdown.get_list()
-        option_list.set_style_bg_color(lv.color_hex(COLOR_BG), 0)
-        option_list.set_style_text_color(lv.color_hex(COLOR_TEXT), 0)
-        option_list.set_style_text_font(ui_font(FONT_BIG), 0)
-        option_list.set_style_border_color(lv.color_hex(COLOR_MUTED), 0)
-        option_list.set_style_max_height(DROPDOWN_LIST_HEIGHT, 0)
-    except Exception as error:
-        print("Dropdown list style skipped:", error)
+        if option_list:
+            _dark_style(option_list, font)
+            option_list.set_style_pad_ver(4, 0)
+            option_list.set_style_max_height(DROPDOWN_LIST_HEIGHT, 0)
+
+    dropdown.add_event_cb(style_list, lv.EVENT.READY, None)
     dropdown.add_event_cb(on_changed, lv.EVENT.VALUE_CHANGED, None)
     return dropdown
 
 
+def show_selected(dropdown, names, keep):
+    """The closed dropdown shows the selected name, cut before the arrow.
+    ``keep`` (a dict) holds the text: LVGL keeps only a pointer."""
+    index = dropdown.get_selected()
+    if index < len(names):
+        name = names[index]
+        if len(name) > STOP_TEXT_CHARS:
+            name = name[: STOP_TEXT_CHARS - 3] + "..."
+        keep[id(dropdown)] = name
+        dropdown.set_text(name)
+
+
+# --- Keyboard and search field (US3.2C, US5.2B) ---
+
+_keyboard = None  # one for all search fields (RAM), made when first needed
+_typing = [None, None]  # the field the keyboard writes to, and its on_search
+
+
+def _upper_keys():
+    keys = []
+    for key in _KEYS_LOWER:
+        if key in _CAPITALS:
+            key = _CAPITALS[key]
+        elif isinstance(key, str) and key.isalpha():
+            key = key.upper()
+        keys.append(key)
+    return keys
+
+
+def _key_widths():
+    """Relative width of each key; rows end with "\\n", the map with ""."""
+    widths = []
+    for key in _KEYS_LOWER:
+        if key == " ":
+            widths.append(10)
+        elif key in _WIDE_KEYS:
+            widths.append(6)
+        elif key not in ("\n", ""):
+            widths.append(4)
+    return widths
+
+
+_KEYS_UPPER = _upper_keys()
+_KEY_WIDTHS = _key_widths()
+
+
+def _search_now(_event=None):
+    """Enter or Search: hide the keyboard and search for the field's text."""
+    _set_hidden(_keyboard, True)
+    field, on_search = _typing
+    if field is not None and on_search is not None:
+        on_search(field.get_text())
+
+
+def _show_keyboard(field, on_search):
+    global _keyboard
+    if _keyboard is None:
+        _keyboard = lv.keyboard(lv.layer_top())
+        _keyboard.set_style_text_font(ui_font(FONT_SMALL), 0)
+        try:
+            for mode, keys in ((lv.keyboard.MODE.TEXT_LOWER, _KEYS_LOWER),
+                               (lv.keyboard.MODE.TEXT_UPPER, _KEYS_UPPER)):
+                _keyboard.set_map(mode, keys, _KEY_WIDTHS)
+        except Exception as error:
+            print("Keyboard without å ä ö:", error)
+        _keyboard.add_event_cb(_search_now, lv.EVENT.READY, None)
+        _keyboard.add_event_cb(lambda _event: _set_hidden(_keyboard, True), lv.EVENT.CANCEL, None)
+    _typing[:] = [field, on_search]
+    _keyboard.set_textarea(field)
+    _set_hidden(_keyboard, False)
+
+
+def make_search_field(parent, width, on_search):
+    """A stop search field: a tap shows the keyboard, Enter calls ``on_search(text)``."""
+    field = lv.textarea(parent)
+    field.set_one_line(True)
+    field.set_placeholder_text("Search for a stop")
+    field.set_size(width, CONTROL_HEIGHT)
+    _dark_style(field, FONT_SMALL)
+    field.add_event_cb(lambda _event: _show_keyboard(field, on_search), lv.EVENT.CLICKED, None)
+    return field
+
+
+# --- The settings screen ---
+
+
+def _show_stop(screen):
+    show_selected(screen["stop_dropdown"], screen["stop_names"], screen)
+
+
 def _show_status(label, text, ok):
-    """Set the text green (ok) or red. Nothing is redrawn if it is the same."""
+    """Green (ok) or red text. Nothing is redrawn if it is the same."""
     if label.get_text() == text:
         return
     label.set_text(text)
@@ -66,29 +236,41 @@ def _show_status(label, text, ok):
 
 
 def create_settings_screen(parent, stop_text, on_stop_changed, on_transport_changed,
-                           on_save, on_reset, transport="All"):
+                           on_save, on_reset, transport="All", on_search=None,
+                           on_refresh=None):
     """Build the screen in ``parent`` (a tile) and return its widgets.
-
-    ``stop_text`` is shown until the stops are set. The on_... functions are
-    called on a change and on Save (US3.4) and Reset (US3.5).
-    """
+    ``stop_text`` is shown until the stops are set."""
     setup_page(parent, 8)
     make_label(parent, "Settings", 0, FONT_BIG, COLOR_TEXT)
 
-    stop_card = _make_section(parent, "Stop", 90)  # US3.2B
-    stop_dropdown = _make_dropdown(stop_card, safe_text(stop_text), 0, on_stop_changed)
+    stop_row = make_row(make_section(parent, "Stop", CARD_HEIGHT), CONTROL_HEIGHT)
+    stop_row.set_width(lv.pct(100))
+    stop_row.set_style_pad_all(0, 0)
+    stop_dropdown = make_dropdown(stop_row, safe_text(stop_text), 0, on_stop_changed, FONT_SMALL)
+    stop_dropdown.set_width(250)
+    search = make_search_field(stop_row, 190, on_search)
 
-    transport_card = _make_section(parent, "Transport type", 90)  # US3.3
+    def on_search_button(_event):
+        _show_keyboard(search, on_search)
+        _search_now()
+
+    make_button(stop_row, "Search", COLOR_SEARCH, (100, CONTROL_HEIGHT), on_search_button, 10)
+
+    transport_card = make_section(parent, "Transport type", CARD_HEIGHT)
     selected = TRANSPORT_TYPES.index(transport) if transport in TRANSPORT_TYPES else 0
-    transport_dropdown = _make_dropdown(
+    transport_dropdown = make_dropdown(
         transport_card, "\n".join(TRANSPORT_TYPES), selected, on_transport_changed
     )
 
-    status_card = _make_section(parent, "Connection status", 100)  # US4.3
+    status_card = make_section(parent, "Connection status", 100)
     wifi_label = make_label(status_card, "Wi-Fi: ...", 0, FONT_BIG, COLOR_MUTED)
     data_label = make_label(status_card, "Live data: ...", 0, FONT_BIG, COLOR_MUTED)
+    # Floating, so it sits right of the two lines instead of below them
+    refresh = make_button(status_card, "Refresh", COLOR_SEARCH, (130, CONTROL_HEIGHT),
+                          on_refresh, 10)
+    refresh.add_flag(lv.obj.FLAG.FLOATING)
+    refresh.align(lv.ALIGN.RIGHT_MID, 0, 0)
 
-    # Save and Reset with a short message next to them
     button_row = lv.obj(parent)
     button_row.set_width(lv.pct(100))
     button_row.set_height(52)
@@ -104,20 +286,25 @@ def create_settings_screen(parent, stop_text, on_stop_changed, on_transport_chan
     make_button(button_row, "Reset to Default", COLOR_RESET, (190, 44), on_reset, 10)
     message = make_label(button_row, "", 0, FONT_SMALL, COLOR_MUTED, wrap=True)
 
-    return {"root": parent, "stop_dropdown": stop_dropdown,
-            "transport_dropdown": transport_dropdown, "wifi": wifi_label,
-            "data": data_label, "message": message}
+    screen = {"root": parent, "stop_dropdown": stop_dropdown,
+              "transport_dropdown": transport_dropdown,
+              "wifi": wifi_label, "data": data_label, "message": message, "stop_names": []}
+    stop_dropdown.add_event_cb(lambda _event: _show_stop(screen), lv.EVENT.VALUE_CHANGED, None)
+    return screen
 
 
 def set_stops(screen, names, selected):
     """Fill the stop dropdown with ``names`` and select ``selected``."""
     if names:
-        screen["stop_dropdown"].set_options("\n".join(safe_text(n) for n in names))
+        screen["stop_names"] = [safe_text(name) for name in names]
+        screen["stop_dropdown"].set_options("\n".join(screen["stop_names"]))
         screen["stop_dropdown"].set_selected(selected)
+        _show_stop(screen)
 
 
 def set_selected_stop(screen, index):
     screen["stop_dropdown"].set_selected(index)
+    _show_stop(screen)
 
 
 def set_transport(screen, transport):
@@ -126,12 +313,11 @@ def set_transport(screen, transport):
 
 
 def show_save_message(screen, text, ok=True):
-    """Show a short message next to the buttons ("" clears it)."""
+    """A short message next to the buttons ("" clears it)."""
     _show_status(screen["message"], safe_text(text), ok)
 
 
 def update_connection_status(screen, wifi_connected, data_ok):
-    """Show if Wi-Fi is connected and if the last fetch worked (US4.3)."""
     _show_status(screen["wifi"], "Wi-Fi: Connected" if wifi_connected else "Wi-Fi: Offline",
                  wifi_connected)
     _show_status(screen["data"], "Live data: OK" if data_ok else "Live data: Error", data_ok)

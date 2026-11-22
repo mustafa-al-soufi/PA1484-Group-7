@@ -65,6 +65,44 @@ alone.
 
 ![PlatformIO tasks for this project](./assets/screenshot.png)
 
+## Testing
+
+The app's logic is covered by unit tests that run on a PC, without the board.
+Run them from the repository root:
+
+```bash
+python -m unittest tests/test_logic.py -v
+```
+
+See [docs/TESTING.md](docs/TESTING.md) for our QA strategy, which tests cover
+each user story, and the manual test cases for the device.
+
+## Coding standard
+
+All Python code in `project/` and `tests/` follows
+[PEP 8](https://peps.python.org/pep-0008/), with lines of at most 99
+characters (PEP 8 allows a team to agree on up to 99). In short:
+
+- `snake_case` for functions and variables, `CapWords` for classes and
+  `UPPER_CASE` for constants, which are placed at the top of each file.
+- A leading `_` marks a name that is only used inside its own module.
+- Imports in three groups: the standard library, then the firmware modules
+  (such as `lvgl`, `network` and `urequests`), then the skeleton's modules and
+  our own.
+- Every module starts with a docstring that names its user stories. Comments
+  explain why the code does something, not what it does.
+
+Check the code from the repository root:
+
+```bash
+python -m pip install pycodestyle
+python -m pycodestyle --max-line-length=99 project/main.py project/screens project/services tests
+```
+
+No output means that the code follows the standard. Do not reformat whole
+files with an auto-formatter such as Black: it makes the files bigger, and the
+project already uses all of the 128 KB filesystem on the device.
+
 ---
 
 # What to add where
