@@ -115,6 +115,27 @@ def search_stops(text):
 # --- Pause during scrolling: TLS and parsing make a swipe stutter ---
 
 
+def useful_stops(groups, limit=10):
+    """US3.2C: in the Karlskrona area, no META_STOP, with traffic, one per name;
+    busiest first, at most ``limit``."""
+    best = {}
+    for group in groups:
+        name = group.get("name") or ""
+        traffic = group.get("average_daily_stop_times") or 0
+        if group.get("area_type") == "META_STOP" or traffic <= 0 or not _in_area(group):
+            continue
+        if name not in best or traffic > best[name]["traffic"]:
+            best[name] = {"id": str(group.get("id")), "name": name, "traffic": traffic}
+    stops = sorted(best.values(), key=lambda stop: -stop["traffic"])
+    return stops[:limit]
+
+
+def search_stops(text):
+    """Stops whose name matches ``text`` (US3.2C): a list, or None on error."""
+    return _fetch(_realtime("stops/name/" + _url_encode(text)),
+                  lambda raw: useful_stops(_iter_json_array(raw, b"stop_groups")))
+
+
 def set_scrolling(scrolling):
     global _scrolling, _scroll_end
     _scrolling = scrolling

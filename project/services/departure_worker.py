@@ -93,6 +93,10 @@ class DepartureWorker:
     def take_stops(self):  # US3.2C
         return self._take("_stops")
 
+    def take_stops(self):  # US3.2C
+        result, self._stops = self._stops, None
+        return result
+
     def _loop(self):
         while True:
             if self.busy:
